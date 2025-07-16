@@ -16,11 +16,13 @@ from .linear import Linear, TensorParallelMode, WeightMode, WeightsLoadingConfig
 
 
 def swiglu(x):
-    if IS_FLASHINFER_AVAILABLE:
-        # WAR for flashinfer activation since it does not support custom op properly
-        from ..custom_ops import flashinfer_silu_and_mul
-        return flashinfer_silu_and_mul(x)
-    else:
+    # if IS_FLASHINFER_AVAILABLE:
+    #     # WAR for flashinfer activation since it does not support custom op properly
+    #     print("trt flashinfer_silu_and_mul",x.shape,x.dtype)
+    #     from ..custom_ops import flashinfer_silu_and_mul
+    #     return flashinfer_silu_and_mul(x)
+    # else:
+        #print("trt swiglu",x.shape,x.dtype)
         gate, x = x.chunk(2, dim=-1)
         return F.silu(gate) * x
 
@@ -43,7 +45,7 @@ class GatedMLP(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.activation = activation
-
+        #print("trt GateMLP activation",self.activation)
         config = config or ModelConfig()
         self.mapping = config.mapping
         if overridden_tp_size is not None:
@@ -102,9 +104,13 @@ class GatedMLP(nn.Module):
         self.fused_gate_up_lora = LoraLayer(
             [LoraModuleType.MLP_GATE_UP],
             [2 * self.intermediate_size // mapping.tp_size])
-
+        
+        self.gate_up_proj_res = None    
+        self.gate_up_proj_res_input = None
+        self.down_proj_res = None
     def _apply_activation(self, x):
         if self.activation == F.silu:
+            #print("trt swiglu",x.shape,x.dtype)
             return swiglu(x)
         elif self.activation == None:
             return x
@@ -126,10 +132,14 @@ class GatedMLP(nn.Module):
                                      final_all_reduce_params, lora_params)
 
         h1 = self.gate_up_proj(x)
+        self.gate_up_proj_res_input = x.clone()
+        self.gate_up_proj_res = h1.clone()
+        #print("trt GateMLP gate_up_proj_res",self.gate_up_proj_res.shape,self.gate_up_proj_res.dtype)
         h2 = self._apply_activation(h1)
         output = self.down_proj(h2,
                                 all_reduce_params=final_all_reduce_params,
                                 layer_idx=self.layer_idx)
+        self.down_proj_res = output.clone()
         return output
 
     def forward_lora(
@@ -143,7 +153,7 @@ class GatedMLP(nn.Module):
         assert self.layer_idx is not None, "layer_idx is required for lora"
 
         h1 = self.gate_up_proj(x)
-
+       
         h1_lora = self.splitted_gate_up_lora(x, lora_params, self.layer_idx)
 
         if h1_lora is not None:

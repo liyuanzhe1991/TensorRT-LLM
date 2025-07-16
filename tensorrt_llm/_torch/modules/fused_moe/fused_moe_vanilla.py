@@ -15,7 +15,7 @@ from .interface import MoEWeightLoadingMode
 from .routing import BaseMoeRoutingMethod
 
 
-class VanillaMoE(nn.ModuleList):
+class VanillaMoE(nn.ModuleList): # this is a module list of experts
 
     def __init__(
         self,
@@ -70,7 +70,7 @@ class VanillaMoE(nn.ModuleList):
         self.parallel_size = self.mapping.tp_size
 
         self.all_reduce = AllReduce(mapping=self.mapping,
-                                    strategy=model_config.allreduce_strategy)
+                                    strategy=model_config.allreduce_strategy) # only support fp16?
 
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
 
@@ -80,7 +80,7 @@ class VanillaMoE(nn.ModuleList):
             self.expert_start + self.expert_size_per_partition,
             self.num_experts)
         self.expert_size_per_partition = self.expert_end - self.expert_start
-
+        #print("rank",self.rank,"layer_idx",,"trt expert_size_per_partition",self.expert_size_per_partition)
         max_num_tokens = model_config.max_num_tokens
         # The maximum number of tokens in MoE are multiplied by DP size when attention DP is enabled
         if self.use_dp:
@@ -95,10 +95,16 @@ class VanillaMoE(nn.ModuleList):
 
         # If True, the router weight will be multiplied on the input rather than at the end of FC2
         self.apply_router_weight_on_input = apply_router_weight_on_input
-
+        
+        self.token_selected_experts=None
+        self.token_final_scales=None
+        
+        #
     def create_experts(self, module_list: nn.ModuleList = None):
+        #print("trt create_experts module_list",module_list)
         if module_list is None:
             module_list = self
+        print("trt create_experts module_list",len(module_list))
         model_config = replace(
             self.model_config,
             mapping=Mapping(
@@ -109,6 +115,7 @@ class VanillaMoE(nn.ModuleList):
             quant_config=self.quant_config,
             skip_create_weights_in_init=False,
         )
+        print("trt create_experts num_experts",self.num_experts,"current ep_rank",self.ep_rank,"expert_start",self.expert_start,"expert_end",self.expert_end)
         for expert_idx in range(self.num_experts):
             if self.expert_start <= expert_idx < self.expert_end:
                 module_list[expert_idx] = GatedMLP(
@@ -122,7 +129,7 @@ class VanillaMoE(nn.ModuleList):
             else:
                 # use identity as placeholder for unused experts
                 module_list[expert_idx] = nn.Identity()
-
+        print("trt create_experts module_list",module_list)
     def create_weights(self):
         if self._weights_created:
             return
@@ -423,6 +430,7 @@ class VanillaMoE(nn.ModuleList):
     def load_weights(self, weights: List[Dict]):
         from ...models.modeling_utils import filter_weights
 
+        #print("hf weights",weights)
         assert self._weights_created
         assert len(weights) == 1
         weights = weights[0]
@@ -435,6 +443,7 @@ class VanillaMoE(nn.ModuleList):
             experts = self
 
         for expert_idx in range(self.expert_start, self.expert_end):
+            #print("hf expert_idx .........",expert_idx)
             experts[expert_idx].gate_up_proj.load_weights([
                 filter_weights(f"{expert_idx}.w1", weights),
                 filter_weights(f"{expert_idx}.w3", weights),
@@ -442,7 +451,7 @@ class VanillaMoE(nn.ModuleList):
             experts[expert_idx].down_proj.load_weights([
                 filter_weights(f"{expert_idx}.w2", weights),
             ])
-
+            
         if self.pack_weights:
             for module_name in ["gate_up_proj", "down_proj"]:
                 for weight_name, _ in getattr(experts[self.expert_start],
@@ -456,14 +465,20 @@ class VanillaMoE(nn.ModuleList):
         use_dp_padding: Optional[bool] = None,
     ):
         outputs = inputs
+        print("trt reducescatter_or_allreduce inputs",inputs.shape)
+        print("parallel_size",self.parallel_size)
+        print("use_dp",self.use_dp)
+        print("reduce_results",self.reduce_results)
         if self.parallel_size > 1:
             if self.use_dp:
+                print("trt reducescatter_or_allreduce inputs using dp format",inputs.shape)
                 outputs = reducescatter(
                     inputs,
                     self.mapping,
                     dim=0,
                     sizes=None if use_dp_padding else all_rank_num_tokens)
             elif self.reduce_results:
+                print("trt reducescatter_or_allreduce inputs using all_reduce",inputs.shape)
                 outputs = self.all_reduce(inputs)
         return outputs
 
@@ -482,6 +497,7 @@ class VanillaMoE(nn.ModuleList):
         )
         for expert_idx in range(self.expert_start, self.expert_end):
             expert_mask = sorted_experts == expert_idx
+            #print("trt expert_mask",expert_mask)
             if not torch.any(expert_mask):
                 continue
             expanded_input = expanded_inputs[expert_mask]
@@ -489,6 +505,7 @@ class VanillaMoE(nn.ModuleList):
             expanded_scale = expanded_scales[expert_mask]
 
             output = self[expert_idx](expanded_input)
+            
             final_hidden_states[batch_idx] += output * expanded_scale
         return final_hidden_states
 
@@ -502,10 +519,12 @@ class VanillaMoE(nn.ModuleList):
     ) -> torch.Tensor:
         assert x.shape[-1] == self.hidden_size
         x = x.view(-1, self.hidden_size)
-
+        #print("trt x",x.shape)
         token_selected_experts, token_final_scales = self.routing_method.apply(
             router_logits)
-
+        self.token_selected_experts=token_selected_experts
+        self.token_final_scales=token_final_scales
+        
         if self.use_dp and self.parallel_size > 1:
             x, token_selected_experts, token_final_scales = allgather(
                 [x, token_selected_experts, token_final_scales],
@@ -513,14 +532,18 @@ class VanillaMoE(nn.ModuleList):
                 dim=0,
                 sizes=None if use_dp_padding else all_rank_num_tokens)
 
+        #print("trt token_selected_experts",token_selected_experts)
         expert_masks = ((token_selected_experts >= self.expert_start)
                         & (token_selected_experts < self.expert_end))
+        
         local_selected_experts = token_selected_experts[expert_masks]
+        #print("local_selected_experts",local_selected_experts)
         sort_indices = torch.argsort(local_selected_experts)
         sorted_experts = local_selected_experts[sort_indices]
 
         batch_indices, nth_experts = torch.where(expert_masks)
         batch_indices = batch_indices[sort_indices]
+        #print("trt batch_indices",batch_indices)
         nth_experts = nth_experts[sort_indices]
         expanded_inputs = x[batch_indices]
         expanded_scales = token_final_scales[batch_indices, nth_experts, None]

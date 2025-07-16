@@ -361,6 +361,8 @@ class PyTorchModelEngine(ModelEngine):
         )
 
         attn_backend = pytorch_backend_config.attn_backend
+        print("start trt creating model from config ....")
+        
         self.model = self._load_model(
             model_path,
             mapping=self.mapping,
@@ -978,6 +980,7 @@ class PyTorchModelEngine(ModelEngine):
                     moe_load_balancer: Optional[MoeLoadBalancerConfig] = None,
                     lora_config: Optional[LoraConfig] = None,
                     **kwargs):
+
         config = ModelConfig.from_pretrained(
             checkpoint_dir,
             trust_remote_code=True,
@@ -989,6 +992,10 @@ class PyTorchModelEngine(ModelEngine):
             moe_load_balancer=moe_load_balancer,
             lora_config=lora_config,
             **kwargs)
+        
+        # Add batch_size to extra_attrs for models that need it (e.g., MiniMax)
+        # This is a more flexible way to pass executor-specific parameters
+        config.extra_attrs['minimax_max_batch_size'] = self.batch_size
 
         validate_and_set_kv_cache_quant(
             config, self.pytorch_backend_config.kv_cache_dtype)
@@ -1003,6 +1010,8 @@ class PyTorchModelEngine(ModelEngine):
         with timing("Model init total"), maybe_create_moe_load_balancer(
                 config, self.mapping) as moe_load_balancer:
             try:
+                # print("trt creating model from config ....")
+                # exit()
                 with MetaInitMode():
                     model = AutoModelForCausalLM.from_config(config)
 
@@ -1022,8 +1031,9 @@ class PyTorchModelEngine(ModelEngine):
                     f"Fallback to regular model init: {traceback.format_exc(limit=1)}\n"
                 )
                 model = AutoModelForCausalLM.from_config(config)
-
+            print("trt creating model from config finish ....")
             model.to("cuda")
+            print("trt creating model to cuda finish ....")
             rank_model_storage = get_rank_model_storage(model)
             logger.info(
                 f"Use {rank_model_storage / (1024**3):.2f} GB for model weights."
@@ -1034,8 +1044,8 @@ class PyTorchModelEngine(ModelEngine):
                     weights = load_weights(model.llm_checkpoint_dir)
                 else:
                     weights = load_weights(checkpoint_dir)
-
-                model.load_weights(weights)
+                #print(f"[DEBUG] load_weights: load_weights，{weights}")
+                model.load_weights(weights)# load weights
 
                 if self.spec_config is not None and self.spec_config.spec_dec_mode.need_load_draft_weights(
                 ):
@@ -1144,6 +1154,7 @@ class PyTorchModelEngine(ModelEngine):
         """
 
         # if new_tensors_device exist, input_ids will only contain new context tokens
+        #print(f"[DEBUG] _prepare_tp_inputs scheduled_requests.context_requests: {scheduled_requests.context_requests}, scheduled_requests.generation_requests: {scheduled_requests.generation_requests}, new_tensors_device: {new_tensors_device}   ")
         input_ids = []
         sequence_lengths = []
         prompt_lengths = []
@@ -2004,6 +2015,7 @@ class PyTorchModelEngine(ModelEngine):
                 new_tensors_device: Optional[SampleStateTensors] = None,
                 gather_context_logits: bool = False):
 
+        #print("forward schedule_requests context_requests: ", len(scheduled_requests.context_requests))
         kv_cache_manager = resource_manager.get_resource_manager(
             self.kv_cache_manager_key)
 

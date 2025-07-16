@@ -522,6 +522,7 @@ class DecoderModelForCausalLM(nn.Module,
         )
 
     def load_weights(self, weights: Dict, skip_modules: List[str] = []):
+        
         _load_weights_impl(self, weights, skip_modules)
 
     def infer_max_seq_len(self) -> int:
@@ -659,6 +660,7 @@ def _load_weights_impl(model: Union[nn.Module, DecoderModelForCausalLM],
 
     for name, module in tqdm(list(model.named_modules()),
                              desc="Loading weights"):
+       
         if len(module._parameters) > 0:
             # skip load weights if module is in skip_modules
             if any(skip_module in name for skip_module in skip_modules):
@@ -678,14 +680,19 @@ def _load_weights_impl(model: Union[nn.Module, DecoderModelForCausalLM],
                 continue
 
             names = name.split('.')
+            #print(f"names: {names}")
             # WAR: better solution is that llama has its own load_weights function.
             if names[-1] == 'next_layer_layernorm':
                 continue
-            if names[-1] in params_map:
+            if names[-1] in params_map :
+               
                 module_weights = []
                 for new_name in params_map[names[-1]]:
+                    #print(f"loading : {new_name}")
+                    #print('.'.join(names[:-1] + [new_name]))
                     fw = filter_weights('.'.join(names[:-1] + [new_name]),
                                         weights)
+                    #print(f"fw: {fw}")
                     if new_name in ['k_proj', 'v_proj']:
                         fw = {
                             k:
@@ -697,7 +704,9 @@ def _load_weights_impl(model: Union[nn.Module, DecoderModelForCausalLM],
                         }
 
                     module_weights.append(fw)
-                module.load_weights(weights=module_weights)
+                    #print("module_weights   ",module_weights)
+                #print("module name   ",module.__class__.__name__)
+                module.load_weights(weights=module_weights) # something wrong here
             else:
                 module_weights = filter_weights(name, weights)
                 if hasattr(module, 'load_weights'):

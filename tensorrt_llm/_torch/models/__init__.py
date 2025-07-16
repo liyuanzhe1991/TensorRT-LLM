@@ -23,6 +23,8 @@ from .modeling_qwen_moe import Qwen2MoeForCausalLM
 from .modeling_siglip import SiglipVisionModel
 from .modeling_utils import get_model_architecture
 from .modeling_vila import VilaModel
+from .modeling_minimax import (MiniMaxText01Config, MiniMaxText01ForCausalLM,
+                               MiniMaxText01Model)
 
 # Note: for better readiblity, this should have same order as imports above
 __all__ = [
@@ -51,6 +53,9 @@ __all__ = [
     "Qwen2_5_VLModel",
     "Qwen3ForCausalLM",
     "Qwen3MoeForCausalLM",
+    "MiniMaxText01Config",
+    "MiniMaxText01Model",
+    "MiniMaxText01ForCausalLM",
 ]
 
 if transformers.__version__ >= "4.45.1":

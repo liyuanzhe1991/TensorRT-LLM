@@ -182,6 +182,14 @@ class ModelConfig(Generic[TConfig]):
             trust_remote_code=trust_remote_code,
         )
 
+        # Special handling for MiniMax models
+        if hasattr(pretrained_config, "architectures") and pretrained_config.architectures:
+            if "MiniMaxText01ForCausalLM" in pretrained_config.architectures[0]:
+                # Convert attn_type_list to decoder_attention_types for MiniMax
+                if hasattr(pretrained_config, 'attn_type_list') and not hasattr(pretrained_config, 'decoder_attention_types'):
+                    pretrained_config.decoder_attention_types = pretrained_config.attn_type_list
+                    logger.info("Converted attn_type_list to decoder_attention_types for MiniMax model")
+
         # Find the cache path by looking for the config.json file which should be in all
         # huggingface models
         model_dir = Path(

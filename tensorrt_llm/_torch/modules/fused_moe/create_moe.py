@@ -55,7 +55,7 @@ def create_moe(
     layer_idx: Optional[int] = None,
 ) -> MoE:
     moe_cls = get_moe_cls(model_config, override_quant_config)
-
+    #print(f"moe_cls: {moe_cls}")
     moe_load_balancer = get_moe_load_balancer()
     if moe_load_balancer is not None:
         assert moe_cls == CutlassFusedMoE, "MoE Load Balance is only supported in CutlassFusedMoE now."

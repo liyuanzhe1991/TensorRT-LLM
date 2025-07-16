@@ -19,7 +19,7 @@ class RMSNorm(nn.Module):
         super().__init__()
         if has_weights:
             self.weight = nn.Parameter(
-                torch.ones(hidden_size, dtype=dtype, device=device))
+                torch.ones(hidden_size, dtype=dtype, device=device)) 
         else:
             self.register_buffer('weight',
                                  torch.ones(hidden_size,

@@ -936,5 +936,5 @@ class CutlassFusedMoE(MoE):
         assert self._weights_created
         assert len(weights) == 1
         weights = weights[0]
-
+        #print("trt load MOE weight",weights)
         self.quant_method.load_weights(self, weights, self.weight_loading_mode)

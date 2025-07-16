@@ -68,7 +68,7 @@ class MoE(nn.Module):
 
         self.ep_size = model_config.mapping.moe_ep_size
         self.ep_rank = model_config.mapping.moe_ep_rank
-
+        #print(self.tp_rank,self.tp_size,self.ep_rank,self.ep_size)
         self.moe_backend = model_config.moe_backend
         self.use_dp = model_config.mapping.enable_attention_dp
 

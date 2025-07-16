@@ -61,8 +61,9 @@ class Attention(nn.Module):
             attention_chunk_size (Optional[int]): See [Chunked Attention] below.
         """
         super().__init__()
+        
         self.layer_idx = layer_idx
-
+        #print("trt .... layer_idx ....",self.layer_idx,"q_scaling ....",q_scaling)
         config = config or ModelConfig()
         self.hidden_size = hidden_size
         self.num_heads = num_attention_heads
@@ -90,7 +91,7 @@ class Attention(nn.Module):
         # 0 0 0 1 1 0
         # 0 0 0 1 1 1
         self.attention_chunk_size = attention_chunk_size
-
+        
         if dense_bias is None:
             self.dense_bias = bias
 
@@ -108,6 +109,7 @@ class Attention(nn.Module):
             gpus_per_node=config.mapping.gpus_per_node,
             enable_attention_dp=config.mapping.enable_attention_dp,
         )
+       
         assert self.num_heads % tp_size == 0
         self.num_heads = self.num_heads // tp_size
         self.num_key_value_heads = (self.num_key_value_heads + tp_size -
@@ -127,6 +129,7 @@ class Attention(nn.Module):
             quant_config=config.get_quant_config(),
             skip_create_weights_in_init=config.skip_create_weights_in_init,
             allreduce_strategy=config.allreduce_strategy)
+        
         self.o_lora = LoraLayer([LoraModuleType.ATTENTION_DENSE],
                                 [self.hidden_size])
 
@@ -141,6 +144,7 @@ class Attention(nn.Module):
             skip_create_weights_in_init=config.skip_create_weights_in_init,
             lora=self.o_lora,
             allreduce_strategy=config.allreduce_strategy)
+       
 
         self.quant_config = config.get_quant_config()
         self.attn_backend = config.attn_backend
@@ -169,17 +173,21 @@ class Attention(nn.Module):
             )
             self.rope_fusion = False
         # If rope_fusion is not specified, enable if the attention backend supports it.
-        if self.rope_fusion is None:
-            self.rope_fusion = attn_cls.support_fused_rope()
-
+        # if self.rope_fusion is None:
+        #     self.rope_fusion = attn_cls.support_fused_rope()
+        #hack
         self.rotary_emb = None
         if not self.rope_fusion and self.pos_embd_params is not None:
+           #print("trt .... is_neox ....",self.pos_embd_params.is_neox)
             self.rotary_emb = RotaryEmbedding(
                 self.pos_embd_params.rope,
                 head_dim=self.head_dim,
                 is_neox=self.pos_embd_params.is_neox,
             )
+      
+         
 
+         
         self.attn = create_attention(
             self.attn_backend,
             self.layer_idx,
@@ -196,6 +204,19 @@ class Attention(nn.Module):
         self.support_fused_qkv = self.attn.support_fused_qkv()
         self.support_nvfp4_output = self.attn.support_nvfp4_output()
 
+        self.q_pre_rope = None
+        self.k_pre_rope = None
+        self.v_pre_rope = None
+        
+        self.q_post_rope = None
+        self.k_post_rope = None
+        self.v_post_rope = None
+        self.flash_attn_output=None
+        self.attn_output=None
+        self.q_before_attn=None
+        self.k_before_attn=None
+        self.v_before_attn=None
+        
         if not config.skip_create_weights_in_init:
             self.create_weights()
 
@@ -247,7 +268,8 @@ class Attention(nn.Module):
             torch.Tensor: The output tensor.
         """
         qkv = self.qkv_proj(hidden_states)
-
+        print("trt attention foward metadata",attn_metadata)
+        kvcache_len=attn_metadata.kv_cache_params.num_cached_tokens_per_seq
         if bool(lora_params):
             qkv_lora = self.splitted_qkv_lora(hidden_states, lora_params,
                                               self.layer_idx)
@@ -260,17 +282,23 @@ class Attention(nn.Module):
                 qkv = qkv + qkv_lora
 
         q, k, v = qkv, None, None
-
+        
         q, k, v = self.apply_rope(q, k, v, position_ids)
-
+        # need to know 
         out_scale = None
         out_scale_sf = None
         if self.o_proj.has_fp8_qdq or self.o_proj.has_nvfp4 or self.o_proj.has_fp8_block_scales:
             out_scale = self.o_proj.inv_input_scale
         if self.o_proj.has_nvfp4 and self.support_nvfp4_output:
             out_scale_sf = self.o_proj.input_scale
-
+        # print("trt q before attn",q.shape)
+        # print("trt k before attn",k.shape)
+        # print("trt v before attn",v.shape)
+        self.q_before_attn=q
+        self.k_before_attn=k
+        self.v_before_attn=v
         q, k, v = self.convert_qkv(q, k, v)
+        
         attn_output = self.attn.forward(
             q,
             k,
@@ -281,15 +309,19 @@ class Attention(nn.Module):
             attention_mask=attention_mask,
             mrope_config=mrope_config,
             attention_window_size=attention_window_size)
+        self.flash_attn_output=attn_output
+        attn_output=attn_output
         hidden_states = attn_output
+        
         attn_output = self.o_proj(attn_output,
                                   all_reduce_params=all_reduce_params,
                                   lora_params=lora_params,
                                   layer_idx=self.layer_idx)
+        self.attn_output=attn_output
         return attn_output
 
     def apply_rope(self, q: torch.Tensor, k: Optional[torch.Tensor],
-                   v: Optional[torch.Tensor], position_ids: torch.Tensor):
+                   v: Optional[torch.Tensor], position_ids: torch.Tensor,kvcache_len:int=0):
         """
         Apply RoPE to the query and key.
         Depending on the implementation, q, k, v could be either fused (q, k, v = concat(q, k, v), None, None) or unfused (none of q, k, v is None).
@@ -304,9 +336,15 @@ class Attention(nn.Module):
             tuple: A tuple of (q, k, v).
         """
         q, k, v = self.split_qkv(q, k, v)
+        self.q_pre_rope = q
+        self.k_pre_rope = k
+        self.v_pre_rope = v
         # If RoPE is fused into the attention OP, do not apply RoPE here.
         if not self.rope_fusion and position_ids is not None:
-            q, k = self.rotary_emb(position_ids, [q, k])
+            q, k = self.rotary_emb(q,k,v,position_ids,k.shape[-2])
+        self.q_post_rope = q
+        self.k_post_rope = k
+        self.v_post_rope = v
         return q, k, v
 
 

@@ -51,10 +51,12 @@ def load_weight_shard(
         tensor_parallel_rank: int = 0,
         tensor_parallel_mode: Optional[TensorParallelMode] = None,
         device: torch.device = torch.device('cpu'),
+        load_from:str="",
 ) -> torch.Tensor:
+    
     if isinstance(weight, torch.Tensor):
         tensor_shape = weight.shape
-
+        #print(f"[DEBUG] load_weight_shard weight.shape: {tensor_shape}")
         def maybe_convert_to_torch_tensor(tensor: torch.Tensor,
                                           indices: slice = None):
             if indices is None:
@@ -75,6 +77,7 @@ def load_weight_shard(
     if tensor_parallel_mode is None or tensor_parallel_size <= 1:
         return maybe_convert_to_torch_tensor(weight)
 
+    
     split_dim = TensorParallelMode.split_dim(tensor_parallel_mode)
 
     if len(tensor_shape) == 1 and split_dim == 1:
@@ -89,6 +92,7 @@ def load_weight_shard(
     slice_end = min((tensor_parallel_rank + 1) * slice_width, width)
     slice_obj = [slice(None)] * len(tensor_shape)
     slice_obj[split_dim] = slice(slice_start, slice_end)
+    print(f"[DEBUG] rank {tensor_parallel_rank},load_from: {load_from}, load_weight_shard weight.shape: {weight.shape},slice_start: {slice_start},slice_end: {slice_end} ")
     return maybe_convert_to_torch_tensor(weight, tuple(slice_obj))
 
 
@@ -101,11 +105,14 @@ def copy_weight(dst: Parameter, src: torch.Tensor):
 
 
 def load_weights_vanilla_helper(module: Linear, weights: List[Dict]):
+    
     assert len(weights) == 1
     device = torch.device('cuda')
-
+    #print(f"[DEBUG] Loading weights: {weights}")
+    #print(f"[DEBUG] weights[0]['weight']: {weights[0]['weight'].shape}")
     weight = load_weight_shard(weights[0]['weight'], module.tp_size,
                                module.tp_rank, module.tp_mode, device)
+    #print(f"[DEBUG] weights[0]['weight']: {weights[0]['weight'].shape},module weight shape: {module.weight.shape}   ")
     copy_weight(module.weight, weight)
 
     if module.bias is not None:
@@ -118,15 +125,18 @@ def load_weights_fused_qkv_helper(
         module: Linear,
         weights: List[Dict]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert len(weights) == 3
+    #print(f"weights: {weights}")
+    #print(f"[DEBUG] Loading weights:  ")
     device = torch.device('cuda')
 
     q_weight = load_weight_shard(weights[0]['weight'], module.tp_size,
-                                 module.tp_rank, module.tp_mode, device)
+                                 module.tp_rank, module.tp_mode, device,load_from="q_weight")
+    
     k_weight = load_weight_shard(weights[1]['weight'], module.tp_size,
-                                 module.tp_rank, module.tp_mode, device)
+                                 module.tp_rank, module.tp_mode, device,load_from="k_weight")
     v_weight = load_weight_shard(weights[2]['weight'], module.tp_size,
-                                 module.tp_rank, module.tp_mode, device)
-
+                                 module.tp_rank, module.tp_mode, device,load_from="v_weight")
+    print("load_weights_fused_qkv_helper",q_weight.shape,k_weight.shape,v_weight.shape)
     if module.bias is not None:
         q_bias = load_weight_shard(weights[0]['bias'], module.tp_size,
                                    module.tp_rank, module.tp_mode, device)
@@ -179,6 +189,7 @@ class LinearMethodBase(ABC):
         """
         Load weights from the checkpoint.
         """
+        #print(f"[Linear] Loading weights: {weight_mode}")
         if weight_mode == WeightMode.VANILLA:
             self.load_weights_vanilla(module, weights)
         elif weight_mode == WeightMode.FUSED_QKV_LINEAR:
@@ -243,19 +254,27 @@ class UnquantizedLinearMethod(LinearMethodBase):
         return output
 
     def load_weights_vanilla(self, module: Linear, weights: List[Dict]):
+        #print("trt load_weights_vanilla",module.__class__.__name__)
         load_weights_vanilla_helper(module, weights)
 
     def load_weights_fused_qkv_linear(self, module: Linear,
                                       weights: List[Dict]):
+ 
+        #print("trt load_weights_fused_qkv_linear",module.__class__.__name__)
         q_weight, k_weight, v_weight = load_weights_fused_qkv_helper(
             module, weights)
         fused_weight = torch.cat((q_weight, k_weight, v_weight))
+        
         copy_weight(module.weight, fused_weight)
 
     def load_weights_fused_gate_up_linear(self, module: Linear,
                                           weights: List[Dict]):
+        #print("trt load_weights_fused_gate_up_linear ",module.__class__.__name__)
+        #print("weights",weights)
         gate_weight, up_weight = load_weights_fused_gate_up_helper(
             module, weights)
+        #print("gate_weight",gate_weight)
+        #print("up_weight",up_weight)
         fused_weight = torch.cat((gate_weight, up_weight))
         copy_weight(module.weight, fused_weight)
 
@@ -712,6 +731,7 @@ class W4A8MXFP4FP8LinearMethod(LinearMethodBase):
 
     def load_weights_fused_qkv_linear(self, module: Linear,
                                       weights: List[Dict]):
+        #print(f"[W4A8MXFP4FP8LinearMethod] Loading weights: {weights}")
         q_weight, k_weight, v_weight = load_weights_fused_qkv_helper(
             module, weights)
         fused_weight = torch.cat((q_weight, k_weight, v_weight))
@@ -904,6 +924,7 @@ class Linear(nn.Module):
                     bias, all_reduce_params)
                 bias = None if fuse_bias else bias
                 output = self.apply_linear(input, bias, lora_params, layer_idx)
+                
                 output = self.all_reduce(
                     output,
                     all_reduce_params=all_reduce_params,

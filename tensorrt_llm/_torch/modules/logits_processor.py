@@ -23,7 +23,7 @@ class LogitsProcessor(nn.Module):
                     dim=0,
                     dtype=torch.long,
                 ) - 1
-                hidden_states = hidden_states[last_tokens]
+                hidden_states = hidden_states[last_tokens.to(hidden_states.device)]
             else:
                 hidden_states = hidden_states[-1]
 

@@ -23,7 +23,10 @@ class RotaryEmbedding(nn.Module):
         self.max_positions = rope_params.max_positions
         self.rotary_cos_sin = rope_params.create_rope_const_params(
             interleave=False)[1].reshape(rope_params.max_positions, 2, -1)
-
+        #print("trt .... self.rotary_cos_sin ....",self.rotary_cos_sin.shape)
+        self.cos=None
+        self.sin=None
+        #self.cos_sin=None
     def forward(
         self,
         position_ids: torch.Tensor,
@@ -34,20 +37,20 @@ class RotaryEmbedding(nn.Module):
         This is useful if q_len = k_len, in which case we may RoPE q and k with the same cos and sin values.
         However, if k is cached without positional embedding, we need to apply rope to q and k with different values, so we need a separate call for each.
         """
-        if IS_FLASHINFER_AVAILABLE and len(targets) == 2:
-            from ..custom_ops import \
-                flashinfer_apply_rope_with_cos_sin_cache_inplace
-            q = targets[0]
-            k = targets[1]
-            flashinfer_apply_rope_with_cos_sin_cache_inplace(
-                position_ids.view(-1),
-                q,
-                k,
-                self.head_dim,
-                self.rotary_cos_sin.view(self.max_positions, -1),
-                self.is_neox,
-            )
-            return [q, k]
+        # if IS_FLASHINFER_AVAILABLE and len(targets) == 2:
+        #     from ..custom_ops import \
+        #         flashinfer_apply_rope_with_cos_sin_cache_inplace
+        #     q = targets[0]
+        #     k = targets[1]
+        #     flashinfer_apply_rope_with_cos_sin_cache_inplace(
+        #         position_ids.view(-1),
+        #         q,
+        #         k,
+        #         self.head_dim,
+        #         self.rotary_cos_sin.view(self.max_positions, -1),
+        #         self.is_neox,
+        #     )
+        #     return [q, k]
 
         # it is assumed all targets are of the same rank
         q_or_k = targets[0]
@@ -57,7 +60,8 @@ class RotaryEmbedding(nn.Module):
         cos, sin = cos_sin[:, 0, :], cos_sin[:, 1, :]
         cos = cos.to(dtype=q_or_k.dtype).unsqueeze(0)
         sin = sin.to(dtype=q_or_k.dtype).unsqueeze(0)
-
+        self.cos=cos
+        self.sin=sin
         if remove_input_padding:
             bsz = 1
             seq_len, _ = q_or_k.size()
@@ -111,6 +115,7 @@ class RotaryEmbedding(nn.Module):
         q_or_k, q_or_k_pass = q_or_k[..., :rot_dim], q_or_k[..., rot_dim:]
 
         if is_neox:
+            #print("trt .... is_neox ....")
             x1 = q_or_k[..., :q_or_k.shape[-1] // 2]
             x2 = q_or_k[..., q_or_k.shape[-1] // 2:]
         else:

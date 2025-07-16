@@ -188,6 +188,12 @@ class PyExecutor:
         self.resource_manager = resource_manager
         self.scheduler = scheduler
         self.model_engine = model_engine
+        print("type of model: ", model_engine.model.__class__.__name__)
+        if "MiniMaxText01ForCausalLM" in model_engine.model.__class__.__name__:
+            #print(f"[PyExecutor] is minimax model")
+
+            self.linear_cache_resource_manager=model_engine.model.attach_linear_cache_manager()
+            
         self.enable_attention_dp = model_engine.enable_attention_dp
         self.sampler = sampler
         self.dist = dist
@@ -1934,8 +1940,11 @@ class PyExecutor:
         self._enqueue_responses(error_responses)
 
     def _terminate_request(self, request: LlmRequest):
+        print(f"rank {self.dist.rank} terminate_request: request: {request} model_engine: {self.model_engine.model.__class__.__name__ }")
         self.resource_manager.free_resources(request)
-
+        # todo: free linear cache
+        if self.model_engine.model.__class__.__name__ == "MiniMaxText01ForCausalLM":
+            self.linear_cache_resource_manager.free_resources(request.request_id)
     @nvtx_range("_handle_cancelled_requests")
     def _handle_cancelled_requests(self):
         #TODO: properly handle canceled ids in pp case
