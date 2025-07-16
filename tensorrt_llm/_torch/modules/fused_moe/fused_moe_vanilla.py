@@ -104,7 +104,7 @@ class VanillaMoE(nn.ModuleList): # this is a module list of experts
         #print("trt create_experts module_list",module_list)
         if module_list is None:
             module_list = self
-        print("trt create_experts module_list",len(module_list))
+        #print("trt create_experts module_list",len(module_list))
         model_config = replace(
             self.model_config,
             mapping=Mapping(
@@ -115,7 +115,7 @@ class VanillaMoE(nn.ModuleList): # this is a module list of experts
             quant_config=self.quant_config,
             skip_create_weights_in_init=False,
         )
-        print("trt create_experts num_experts",self.num_experts,"current ep_rank",self.ep_rank,"expert_start",self.expert_start,"expert_end",self.expert_end)
+        #print("trt create_experts num_experts",self.num_experts,"current ep_rank",self.ep_rank,"expert_start",self.expert_start,"expert_end",self.expert_end)
         for expert_idx in range(self.num_experts):
             if self.expert_start <= expert_idx < self.expert_end:
                 module_list[expert_idx] = GatedMLP(
@@ -129,7 +129,7 @@ class VanillaMoE(nn.ModuleList): # this is a module list of experts
             else:
                 # use identity as placeholder for unused experts
                 module_list[expert_idx] = nn.Identity()
-        print("trt create_experts module_list",module_list)
+        #print("trt create_experts module_list",module_list)
     def create_weights(self):
         if self._weights_created:
             return
@@ -465,20 +465,17 @@ class VanillaMoE(nn.ModuleList): # this is a module list of experts
         use_dp_padding: Optional[bool] = None,
     ):
         outputs = inputs
-        print("trt reducescatter_or_allreduce inputs",inputs.shape)
-        print("parallel_size",self.parallel_size)
-        print("use_dp",self.use_dp)
-        print("reduce_results",self.reduce_results)
+        
         if self.parallel_size > 1:
             if self.use_dp:
-                print("trt reducescatter_or_allreduce inputs using dp format",inputs.shape)
+                #print("trt reducescatter_or_allreduce inputs using dp format",inputs.shape)
                 outputs = reducescatter(
                     inputs,
                     self.mapping,
                     dim=0,
                     sizes=None if use_dp_padding else all_rank_num_tokens)
             elif self.reduce_results:
-                print("trt reducescatter_or_allreduce inputs using all_reduce",inputs.shape)
+                #print("trt reducescatter_or_allreduce inputs using all_reduce",inputs.shape)
                 outputs = self.all_reduce(inputs)
         return outputs
 

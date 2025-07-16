@@ -268,7 +268,7 @@ class Attention(nn.Module):
             torch.Tensor: The output tensor.
         """
         qkv = self.qkv_proj(hidden_states)
-        print("trt attention foward metadata",attn_metadata)
+        #print("trt attention foward metadata",attn_metadata)
         kvcache_len=attn_metadata.kv_cache_params.num_cached_tokens_per_seq
         if bool(lora_params):
             qkv_lora = self.splitted_qkv_lora(hidden_states, lora_params,

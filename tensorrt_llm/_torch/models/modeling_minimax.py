@@ -73,7 +73,7 @@ class MiniMaxLinearCacheManager:
             dtype=dtype,
             device=device,
         )
-        print(f"trt init linear cache manager finish shape of cache is {self.cache.shape}, size of ....")
+        #print(f"trt init linear cache manager finish shape of cache is {self.cache.shape}, size of ....")
         # Mapping system inspired by vLLM
         # Maps seq_id -> cache slot index
         
@@ -127,7 +127,7 @@ class MiniMaxLinearCacheManager:
     
     def free_seq(self, seq_id: int):
         """Free the cache slot used by a sequence"""
-        print("trt free_seq",seq_id)
+        #print("trt free_seq",seq_id)
         if seq_id in self.seq_id_to_slot_idx.keys():
             slot_idx = self.seq_id_to_slot_idx[seq_id]
             del self.seq_id_to_slot_idx[seq_id]
@@ -336,33 +336,32 @@ class MiniMaxText01RMSNormTP(nn.Module):
         self.variance_epsilon = eps
         # Use float32 for all_reduce to ensure compatibility
         self.all_reduce = AllReduce(mapping=mapping, dtype=torch.float32,strategy=AllReduceStrategy.NCCL)
-        self.variance_res=None
-        self.input_layernorm_input=None
-        self.input_layernorm_output=None
+        
+        # self.variance_res=None
+        # self.input_layernorm_input=None
+        # self.input_layernorm_output=None
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x shape: [seq_len, local_hidden_size] where local_hidden_size = tp_heads * head_dim
     
         orig_dtype = x.dtype
         x = x.to(torch.float32)
-        self.input_layernorm_input=x.clone()
-        #print("x",x.shape,x.dtype,x.mean(),x.std())
+        #self.input_layernorm_input=x.clone()
+   
         # Compute variance locally first
         variance = x.pow(2).mean(dim=-1, keepdim=True)
-        print("variance",variance.shape,variance.dtype)
+        #print("variance",variance.shape,variance.dtype)
         if self.tp_world > 1:
             variance = self.all_reduce(input=variance) / self.tp_world
-        print("tp variance",variance)
-        self.variance_res=variance
-        #print("variance",variance.device,variance.dtype,variance.shape)
-        # If using tensor parallelism, all-reduce the variance
-        
+        #print("tp variance",variance)
+        #self.variance_res=variance
+      
         
         # Apply RMS normalization
         x = x * torch.rsqrt(variance + self.variance_epsilon)
         
         # Handle weight size mismatch
         weight = self.weight
-        print("x",x.shape,"weight",self.weight.shape)
+        #print("x",x.shape,"weight",self.weight.shape)
         if x.size(-1) != self.weight.size(0):
             if self.weight.size(0) < x.size(-1):
                 repeat_count = (x.size(-1) + self.weight.size(0) - 1) // self.weight.size(0)
@@ -373,7 +372,7 @@ class MiniMaxText01RMSNormTP(nn.Module):
         
         # Apply weight
         x = x.to(orig_dtype) * weight
-        self.input_layernorm_output=x.clone()
+        #self.input_layernorm_output=x.clone()
         return x
     
     
@@ -382,10 +381,10 @@ class MiniMaxText01RMSNormTP(nn.Module):
         weights: torch.Tensor,
     ) -> None:
         
-        print(f"RMSNormTP load_weights ................",weights[0]['weight'].shape,self.tp_world,self.tp_rank,self.weight.shape)
+        #print(f"RMSNormTP load_weights ................",weights[0]['weight'].shape,self.tp_world,self.tp_rank,self.weight.shape)
         assert len(weights) == 1
         shard_size = weights[0]['weight'].shape[0] // self.tp_world
-        print("tp rank",self.tp_rank,"shard_size",shard_size)
+        #print("tp rank",self.tp_rank,"shard_size",shard_size)
         shard = slice(self.tp_rank * shard_size, (self.tp_rank + 1) * shard_size)
         
         # Avoid in-place operation on parameter that requires grad
@@ -480,7 +479,7 @@ class MiniMaxText01LinearAttention(nn.Module):
         
         # Build slope tensor on the correct device
         slope_rate = self._build_slope_tensor(self.num_heads)
-        print("trt slope_rate",slope_rate.shape)
+        #print("trt slope_rate",slope_rate.shape)
         
         self.slope_rate = slope_rate * (1 - layer_idx / (80 - 1) + 1e-5)
         # self.tp_slope = self.slope_rate[self.tp_rank *
@@ -489,7 +488,7 @@ class MiniMaxText01LinearAttention(nn.Module):
         # Move to GPU and make it a buffer (not a parameter)
         self.register_buffer('tp_slope', 
                            self.slope_rate[self.tp_rank * self.tp_heads:(self.tp_rank + 1) * self.tp_heads].contiguous())
-        print("trt tp_slope",self.tp_slope.shape)
+        #print("trt tp_slope",self.tp_slope.shape)
         #reset tp_slope to 1
         #self.tp_slope.fill_(1)
         
@@ -499,7 +498,6 @@ class MiniMaxText01LinearAttention(nn.Module):
         self.qkv=None
         self.lightning_output=None
         self.attn_norm_output=None
-        #self.all_reduce = AllReduce(mapping=model_config.mapping, dtype=torch.bfloat16,strategy=AllReduceStrategy.NCCL)
         self.input_hidden_states=None
         #self.all_gather = allgather(mapping=model_config.mapping, dtype=torch.bfloat16)
         
@@ -537,7 +535,7 @@ class MiniMaxText01LinearAttention(nn.Module):
     ) -> torch.Tensor:
 
         
-        self.input_hidden_states=hidden_states.clone()
+        #self.input_hidden_states=hidden_states.clone()
         #hidden_states=hidden_states.to(torch.float32)
         qkv = self.linear_qkv_proj(hidden_states)
         #qkv=qkv.to(torch.float32)
@@ -545,23 +543,23 @@ class MiniMaxText01LinearAttention(nn.Module):
         #print("trt qkv shape",qkv.shape)#[s,3*1024]
         #_qkv=qkv.split([1024]*3,dim=-1)
        
-        self.qkv=qkv
+        #self.qkv=qkv
         #if it's possiable that all q?
         new_shape = qkv.size()[:-1] + (self.tp_heads, -1)
         
         #print("hf new_shape",new_shape)
         qkv = qkv.view(*new_shape)
-        print("trt qkv",qkv.shape)
+        #print("trt qkv",qkv.shape)
         q, k, v = torch.split(qkv, [self.head_dim] * 3, dim=-1)
-        self.q=allgather(q.clone(),mapping=self.mapping,dim=1)
-        self.k=allgather(k.clone(),mapping=self.mapping,dim=1)
-        self.v=allgather(v.clone(),mapping=self.mapping,dim=1)
-        print("trt q",self.q.shape,self.q.dtype,"k",self.k.shape,self.k.dtype,"v",self.v.shape,self.v.dtype)
+        #self.q=allgather(q.clone(),mapping=self.mapping,dim=1)
+        #self.k=allgather(k.clone(),mapping=self.mapping,dim=1)
+        #self.v=allgather(v.clone(),mapping=self.mapping,dim=1)
+        #print("trt q",self.q.shape,self.q.dtype,"k",self.k.shape,self.k.dtype,"v",self.v.shape,self.v.dtype)
     
         #new_shape = qkv.size()[:-1] + (self.tp_heads, -1)
      
         #qkv = qkv.view(*new_shape)
-        print("trt qkv",qkv.shape)
+        #print("trt qkv",qkv.shape)
         #q = qkv[..., 0:1024]
         #k = qkv[..., 1024:2048]
         #v = qkv[..., 2048:]
@@ -620,8 +618,8 @@ class MiniMaxText01LinearAttention(nn.Module):
     
     # 可选：重塑为 [seq_len, tp_heads, head_dim] 以便调试
         output_with_heads = output.reshape(output_with_heads.shape[0], self.tp_heads, self.head_dim)
-        self.lightning_output=allgather(output_with_heads.clone(),mapping=self.mapping,dim=1)
-        print("trt lightning_output",self.lightning_output.shape)#【4,8,128]
+        #self.lightning_output=allgather(output_with_heads.clone(),mapping=self.mapping,dim=1)
+        #print("trt lightning_output",self.lightning_output.shape)#【4,8,128]
         # Apply normalization
         output = self.norm(output)
         
@@ -669,7 +667,7 @@ class MiniMaxText01LinearAttention(nn.Module):
             
             # Process with Lightning Attention (causal masking is implicit)
             #print("trt tp_slope",self.tp_slope)
-            print("trt prefill seq_idx",seq_idx,"cache_idx",cache_idx)
+            #print("trt prefill seq_idx",seq_idx,"cache_idx",cache_idx)
             seq_output = self._lightning_attention_forward(
                 seq_q,
                 seq_k,
@@ -706,7 +704,7 @@ class MiniMaxText01LinearAttention(nn.Module):
             
             # Process single token for this sequence
             # In decode phase, each sequence has exactly one new token
-            print("trt decode seq_idx",seq_idx,"cache_idx",cache_idx)
+            #print("trt decode seq_idx",seq_idx,"cache_idx",cache_idx)
             seq_output = self._lightning_attention_decode(
                 q[seq_idx:seq_idx+1],  # [1, tp_heads, head_dim]
                 k[seq_idx:seq_idx+1],  # [1, tp_heads, head_dim]
@@ -762,7 +760,7 @@ class MiniMaxText01LinearAttention(nn.Module):
         s_index = torch.where(index >= 0, -s_index, float("-inf"))
         diag_decay = torch.exp(s_index)
         
-        self.diag_decay=diag_decay
+        #self.diag_decay=diag_decay
         # Initialize KV state
         kv = kv_state.float()  # [h, d, e]
         output = torch.empty((b, h, n, e), dtype=q.dtype, device=q.device)
@@ -802,12 +800,12 @@ class MiniMaxText01LinearAttention(nn.Module):
             ).squeeze(0)  # Remove batch dimension for kv update
         
         # Update the KV state
-        print("trt kv",kv.shape,kv.dtype,kv.device)
+        #print("trt kv",kv.shape,kv.dtype,kv.device)
         
         with torch.no_grad():
             kv_state.copy_(kv)
-        if self.layer_idx==0 and self.tp_rank==0:
-            print("layer {} rank {} trt kv_state prefill".format(self.layer_idx,self.tp_rank),kv_state.shape,kv_state.dtype,kv_state.device,kv_state.min(),kv_state.max(),kv_state.mean())
+        # if self.layer_idx==0 and self.tp_rank==0:
+        #     print("layer {} rank {} trt kv_state prefill".format(self.layer_idx,self.tp_rank),kv_state.shape,kv_state.dtype,kv_state.device,kv_state.min(),kv_state.max(),kv_state.mean())
         # Convert back to original format and dtype
         output = output.squeeze(0).transpose(0, 1).contiguous()  # [n, h, d]
         #output = output.to(orig_dtype)
@@ -829,10 +827,10 @@ class MiniMaxText01LinearAttention(nn.Module):
         q = q.to(torch.float32)
         k = k.to(torch.float32)
         v = v.to(torch.float32)
-        print("trt decode q k v shape",q.shape,k.shape,v.shape)
+        #print("trt decode q k v shape",q.shape,k.shape,v.shape)
         kv_state_float = kv_state.to(torch.float32)
-        if self.layer_idx==0 and self.tp_rank==0:
-            print("layer {} rank {} trt kv_state decode".format(self.layer_idx,self.tp_rank),kv_state.shape,kv_state.dtype,kv_state.device,kv_state.min(),kv_state.max(),kv_state.mean())
+        #if self.layer_idx==0 and self.tp_rank==0:
+        #    print("layer {} rank {} trt kv_state decode".format(self.layer_idx,self.tp_rank),kv_state.shape,kv_state.dtype,kv_state.device,kv_state.min(),kv_state.max(),kv_state.mean())
         #print("trt kv_state_float",kv_state_float.device,kv_state_float.dtype,kv_state_float.shape)
         # Get ratio (same as HF)
         ratio = torch.exp(-slope_rate)  # [tp_heads, 1, 1]
@@ -843,9 +841,9 @@ class MiniMaxText01LinearAttention(nn.Module):
         kv_update = torch.einsum('nhd,nhe->hde', k, v)  # [tp_heads, head_dim, head_dim]
         # print("trt kv_update",kv_update.device,kv_update.dtype,kv_update.shape)
         # print("trt ratio",ratio.device,ratio.dtype,ratio.shape)
-        self.decode_kv_state=kv_state_float.clone()
+        #self.decode_kv_state=kv_state_float.clone()
         new_kv_state = ratio * kv_state_float + kv_update
-        self.decode_kv=new_kv_state.clone()
+        #self.decode_kv=new_kv_state.clone()
         # Update the original kv_state in-place
         with torch.no_grad():
             kv_state.copy_(new_kv_state.to(orig_dtype))
@@ -860,7 +858,7 @@ class MiniMaxText01LinearAttention(nn.Module):
         kv_expanded = new_kv_state.unsqueeze(0)  # [1, tp_heads, head_dim, head_dim]
         output = torch.einsum('...ne,...ed->...nd', q_expanded, kv_expanded.to(q.dtype))
         output = output.squeeze(2)  # [1, tp_heads, head_dim]
-        self.decode_qkv=output.clone()
+        #self.decode_qkv=output.clone()
         # Convert back to original dtype
         output = output.to(orig_dtype)
         
@@ -940,8 +938,8 @@ class MiniMaxText01RotaryEmbedding(nn.Module):
         # self.q=None
         # self.k=None
         # self.v=None
-        self.q_post_rope=None
-        self.k_post_rope=None
+        #self.q_post_rope=None
+        #self.k_post_rope=None
         # Build here to make `torch.jit.trace` work.
         self._set_cos_sin_cache(
             seq_len=max_position_embeddings, device=self.inv_freq.device, dtype=torch.bfloat16
@@ -976,15 +974,15 @@ class MiniMaxText01RotaryEmbedding(nn.Module):
         q = q.reshape(bsz, q_len,self.num_heads, self.head_dim).transpose(1, 2)
         k = k.reshape(bsz, q_len,self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = v.reshape(bsz, q_len,self.num_kv_heads, self.head_dim).transpose(1, 2)  
-        self.q=q
-        self.k=k
-        self.v=v
+        #self.q=q
+        #self.k=k
+        #self.v=v
         position_ids = position_ids.view(bsz, seq_len)
         #print("trt rotary emb forward position_ids",position_ids)
         kv_seq_len = k.shape[-2]
         if past_kv_len > 0:
             kv_seq_len += past_kv_len
-        print("trt rotary emb forward past_kv_len",past_kv_len," kv_seq_len ",kv_seq_len," position_ids ",position_ids[:,-1].max().item())
+        #print("trt rotary emb forward past_kv_len",past_kv_len," kv_seq_len ",kv_seq_len," position_ids ",position_ids[:,-1].max().item())
         rotary_seq_len = max(kv_seq_len, position_ids[:, -1].max().item()) + 1
         # print("trt rotary emb forward q",q.shape,q.dtype)
         # print("trt rotary emb forward k",k.shape,k.dtype)
@@ -996,8 +994,8 @@ class MiniMaxText01RotaryEmbedding(nn.Module):
         # self.sin=sin
         #print("position_ids",position_ids.shape,position_ids.dtype)
         q, k = apply_rotary_pos_emb(q, k,  cos, sin, position_ids)
-        self.q_post_rope=q
-        self.k_post_rope=k  
+        #self.q_post_rope=q
+        #self.k_post_rope=k  
         q = q.transpose(1, 2).reshape(q_len, -1)
         k = k.transpose(1, 2).reshape(q_len, -1)
         return q, k
@@ -1076,13 +1074,13 @@ class MiniMaxText01MoE(nn.Module):
             layer_idx=layer_idx
 
         )
-        print("trt creating moe, layer_idx",layer_idx,"num_experts",len(self.experts))
+        #print("trt creating moe, layer_idx",layer_idx,"num_experts",len(self.experts))
         #print("trt creating moe, self.experts",type(self.ex)
         #print("trt self.experts",type(self.experts),self.experts)
         #print("trt self.experts[0]",type(self.experts[0]),self.experts[0])
         #print(f"self.experts: {self.experts}")
-        self.gate_input=None
-        self.gate_output=None
+        #self.gate_input=None
+        #self.gate_output=None
     def _create_routing_method(self):
  
         moe_instance = self  
@@ -1110,9 +1108,9 @@ class MiniMaxText01MoE(nn.Module):
         return MiniMaxRoutingMethod(self.top_k)
         
     def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
-        self.gate_input=hidden_states.clone()
+        #self.gate_input=hidden_states.clone()
         router_logits = self.gate(hidden_states)
-        self.gate_output=router_logits.clone()
+        #self.gate_output=router_logits.clone()
         output = self.experts(hidden_states, router_logits)
         #print("trt output",output.shape,output.dtype,output)
         return output
@@ -1138,7 +1136,7 @@ class MiniMaxText01DecoderLayer(DecoderLayer):
             config.decoder_attention_types = [1] * config.num_hidden_layers
         
         self.attention_type = config.decoder_attention_types[layer_idx]
-        self.input_layernorm_output=None
+        #self.input_layernorm_output=None
         # Layer norms
         self.input_layernorm = MiniMaxText01RMSNorm(
             hidden_size=config.hidden_size,
@@ -1219,8 +1217,9 @@ class MiniMaxText01DecoderLayer(DecoderLayer):
         self.layernorm_mlp_beta = config.layernorm_mlp_beta
         
         self.postnorm = config.postnorm
-        self.mlp_input=None
-        self.mlp_output=None
+        
+        #self.mlp_input=None
+        #self.mlp_output=None
     def forward(
         self,
         position_ids: torch.IntTensor,
@@ -1234,10 +1233,10 @@ class MiniMaxText01DecoderLayer(DecoderLayer):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         layernorm_input = hidden_states
         #print("trt decoder layer forward layernorm_input",layernorm_input.shape,layernorm_input.dtype)
-        self.input_layernorm_input=layernorm_input.clone()
+        #self.input_layernorm_input=layernorm_input.clone()
         layernorm_output = self.input_layernorm(layernorm_input)
         #print("trt decoder layer forward layernorm_output",layernorm_output.shape,layernorm_output.dtype)
-        self.input_layernorm_output=layernorm_output.clone()
+        #self.input_layernorm_output=layernorm_output.clone()
         residual = layernorm_output if self.postnorm else layernorm_input
        # print("trt decoder layer forward position_ids",position_ids)
         # Self attention
@@ -1276,7 +1275,7 @@ class MiniMaxText01DecoderLayer(DecoderLayer):
         residual = hidden_states if self.postnorm else layernorm_input
         # MLP
         
-        self.mlp_input=hidden_states.clone()
+        #self.mlp_input=hidden_states.clone()
         if self.shared_mlp is not None:
             mlp_output = self.mlp(hidden_states)
             shared_output = self.shared_mlp(hidden_states)
@@ -1293,7 +1292,7 @@ class MiniMaxText01DecoderLayer(DecoderLayer):
             mlp_output = self.mlp(hidden_states)
             
         # Apply residual
-        self.mlp_output=mlp_output.clone()
+        #self.mlp_output=mlp_output.clone()
         hidden_states = residual * self.layernorm_mlp_alpha \
                         + mlp_output * self.layernorm_mlp_beta
         # if self.model_config.mapping.tp_rank == 0:
@@ -1324,7 +1323,7 @@ class MiniMaxText01Model(DecoderModel):
         
         self.linear_cache_resource_manager: MiniMaxLinearCacheResourceManager = None 
         # Initialize linear cache manager if we have linear attention layers
-        print("mapping debug tp_rank",self.model_config.mapping.tp_rank,self.model_config.mapping.tp_size,"ep_rank",self.model_config.mapping.moe_ep_rank,"ep_size",self.model_config.mapping.moe_ep_size)
+        #print("mapping debug tp_rank",self.model_config.mapping.tp_rank,self.model_config.mapping.tp_size,"ep_rank",self.model_config.mapping.moe_ep_rank,"ep_size",self.model_config.mapping.moe_ep_size)
         #exit()
         self.tp_rank=self.model_config.mapping.tp_rank
         self.tp_size=self.model_config.mapping.tp_size
@@ -1375,7 +1374,7 @@ class MiniMaxText01Model(DecoderModel):
         for layer_idx in range(config.num_hidden_layers):
             layer = MiniMaxText01DecoderLayer(model_config, layer_idx)
             self.layers.append(layer)
-        print("trt creating layers, self.layers",len(self.layers))
+        #print("trt creating layers, self.layers",len(self.layers))
         # Create the final RMSNorm layer
         self.norm = RMSNorm(
             hidden_size=config.hidden_size,
@@ -1394,8 +1393,8 @@ class MiniMaxText01Model(DecoderModel):
         **kwargs,
     ) -> torch.Tensor:
         # Get embeddings
-        if self.tp_rank == 0:
-            print("trt forward input_ids",input_ids.shape,input_ids.dtype)
+        # if self.tp_rank == 0:
+        #     print("trt forward input_ids",input_ids.shape,input_ids.dtype)
         if self.model_config.mapping.is_first_pp_rank():
             if inputs_embeds is None:
                 hidden_states = self.embed_tokens(input_ids)
@@ -1451,11 +1450,10 @@ class MiniMaxText01Model(DecoderModel):
             # Forward through layer
             #record the input output of each layer
            
-            if self.tp_rank == 0 and self.ep_rank == 0:
-                #self.input_output_dict[layer_idx]={"input":None,"output":None}
-                self.input_output_dict[f"layer_{layer_idx}_input"]=hidden_states.detach().float().cpu().numpy()
-                #self.input_output_dict[f"layer_{layer_idx}_qkv"]=layer.self_attn.qkv_proj.weight.detach().float().cpu().numpy()
-                #print("trt layer input",f"layer_{layer_idx}_input",self.input_output_dict[f"layer_{layer_idx}_input"].shape,self.input_output_dict[f"layer_{layer_idx}_input"].mean(),self.input_output_dict[f"layer_{layer_idx}_input"].std())
+            # if self.tp_rank == 0 and self.ep_rank == 0:
+               
+            #     self.input_output_dict[f"layer_{layer_idx}_input"]=hidden_states.detach().float().cpu().numpy()
+               
             hidden_states, residual = layer(
                 position_ids=position_ids,
                 hidden_states=hidden_states,
@@ -1466,57 +1464,50 @@ class MiniMaxText01Model(DecoderModel):
                 state_indices=state_indices,
                 **kwargs,
             )
-            if self.tp_rank == 0 and self.ep_rank == 0:
-                self.input_output_dict[f"layer_{layer_idx}_output"]=hidden_states.detach().float().cpu().numpy() 
-                if  (layer_idx+1)%8!=0:
-                    self.input_output_dict[f"layer_{layer_idx}_attn_output"]=layer.self_attn.output_proj_res.detach().float().cpu().numpy()
-                    #self.input_output_dict[f"layer_{layer_idx}_layernorm_output"]=layer.input_layernorm_output.detach().float().cpu().numpy()  
-                    #self.input_output_dict[f"layer_{layer_idx}_layernorm_input"]=layer.input_layernorm_input.detach().float().cpu().numpy()  
-                    self.input_output_dict[f"layer_{layer_idx}_lightning_output"]=layer.self_attn.lightning_output.detach().float().cpu().numpy()
-                    self.input_output_dict[f"layer_{layer_idx}_mlp_input"]=layer.mlp_input.detach().float().cpu().numpy()
-                    self.input_output_dict[f"layer_{layer_idx}_mlp_output"]=layer.mlp_output.detach().float().cpu().numpy()
-                    if getattr(layer.self_attn,"q",None) is not None:
-                        self.input_output_dict[f"layer_{layer_idx}_variance"]=layer.self_attn.norm.variance_res.detach().float().cpu().numpy()
-                        self.input_output_dict[f"layer_{layer_idx}_q"]=layer.self_attn.q.detach().float().cpu().numpy()
-                        self.input_output_dict[f"layer_{layer_idx}_k"]=layer.self_attn.k.detach().float().cpu().numpy()
-                        self.input_output_dict[f"layer_{layer_idx}_v"]=layer.self_attn.v.detach().float().cpu().numpy()
-                        self.input_output_dict[f"layer_{layer_idx}_attn_input"]=layer.self_attn.input_hidden_states.detach().float().cpu().numpy()
-                        self.input_output_dict[f"layer_{layer_idx}_qkv_res"]=layer.self_attn.qkv.detach().float().cpu().numpy()
-                    if getattr(layer.self_attn,"decode_kv",None) is not None:
-                        self.input_output_dict[f"layer_{layer_idx}_decode_kv"]=layer.self_attn.decode_kv.detach().float().cpu().numpy()
-                        self.input_output_dict[f"layer_{layer_idx}_decode_kv_state"]=layer.self_attn.decode_kv_state.detach().float().cpu().numpy()
-                        self.input_output_dict[f"layer_{layer_idx}_decode_qkv"]=layer.self_attn.decode_qkv.detach().float().cpu().numpy()
-                        self.input_output_dict[f"layer_{layer_idx}_decode_q"]=layer.self_attn.decode_q.detach().float().cpu().numpy()
-                    #self.input_output_dict[f"layer_{layer_idx}_qkv"]=layer.self_attn.qkv_proj.weight.detach().float().cpu().numpy()
-                    #self.input_output_dict[f"layer_{layer_idx}_attn_norm_output"]=layer.self_attn.attn_norm_output.detach().float().cpu().numpy()
-                #print("trt layer output",f"layer_{layer_idx}_output",self.input_output_dict[f"layer_{layer_idx}_output"].shape,self.input_output_dict[f"layer_{layer_idx}_output"].mean(),self.input_output_dict[f"layer_{layer_idx}_output"].std())
-                #if layer_idx!=7:
-            #to verify the moe weights first     
-            if layer_idx==0:
-                print("trt layer_0 ep rank0 exeperts list len",len(layer.mlp.experts))
-                self.input_output_dict[f"layer_{layer_idx}_mlp_weights_gate_input"]=layer.mlp.gate_input.detach().float().cpu().numpy()
-                self.input_output_dict[f"layer_{layer_idx}_mlp_weights_gate_output"]=layer.mlp.gate_output.detach().float().cpu().numpy()
-                self.input_output_dict[f"layer_{layer_idx}_mlp_token_selected_experts"]=layer.mlp.experts.token_selected_experts.detach().float().cpu().numpy()
-                self.input_output_dict[f"layer_{layer_idx}_mlp_token_final_scales"]=layer.mlp.experts.token_final_scales.detach().float().cpu().numpy()
-                for i in range(layer.mlp.num_experts):
-                    # Check if the expert is not an Identity module (placeholder for unused experts in EP)
-                    if not isinstance(layer.mlp.experts[i], nn.Identity) and layer.mlp.experts[i].gate_up_proj_res_input is not None:
-                        self.input_output_dict[f"layer_{layer_idx}_mlp_expert_{i}_gate_up_proj_input"]=layer.mlp.experts[i].gate_up_proj_res_input.detach().float().cpu().numpy()
-                        self.input_output_dict[f"layer_{layer_idx}_mlp_expert_{i}_gate_up_proj_res"]=layer.mlp.experts[i].gate_up_proj_res.detach().float().cpu().numpy()
-                        self.input_output_dict[f"layer_{layer_idx}_mlp_expert_{i}_down_proj_res"]=layer.mlp.experts[i].down_proj_res.detach().float().cpu().numpy()
-                        
-                        #self.input_output_dict[f"layer_{layer_idx}_mlp_weights_expert_{i}_gate_up_proj"]=layer.mlp.experts[i].gate_up_proj.weight.detach().float().cpu().numpy()
-                        #self.input_output_dict[f"layer_{layer_idx}_mlp_weights_expert_{i}_down_proj"]=layer.mlp.experts[i].down_proj.weight.detach().float().cpu().numpy()
-                        #self.input_output_dict[f"layer_{layer_idx}_mlp_weights_expert_{i}_gate_up_proj_weight"]=layer.mlp.experts[i].gate_up_proj_weight.detach().float().cpu().numpy()
-                    else:
-                        print("trt layer_idx",layer_idx,"rank",self.ep_rank,"expert",i,"is an Identity module")
-                # Get MoE gate (router) weights
-                if hasattr(layer.mlp, 'gate') and hasattr(layer.mlp.gate, 'weight'):
-                    self.input_output_dict[f"layer_{layer_idx}_moe_gate_weight"]=layer.mlp.gate.weight.detach().float().cpu().numpy()
+            # if self.tp_rank == 0 and self.ep_rank == 0:
+            #     self.input_output_dict[f"layer_{layer_idx}_output"]=hidden_states.detach().float().cpu().numpy() 
+            #     if  (layer_idx+1)%8!=0:
+            #         self.input_output_dict[f"layer_{layer_idx}_attn_output"]=layer.self_attn.output_proj_res.detach().float().cpu().numpy()
+            #         #self.input_output_dict[f"layer_{layer_idx}_layernorm_output"]=layer.input_layernorm_output.detach().float().cpu().numpy()  
+            #         #self.input_output_dict[f"layer_{layer_idx}_layernorm_input"]=layer.input_layernorm_input.detach().float().cpu().numpy()  
+            #         self.input_output_dict[f"layer_{layer_idx}_lightning_output"]=layer.self_attn.lightning_output.detach().float().cpu().numpy()
+            #         self.input_output_dict[f"layer_{layer_idx}_mlp_input"]=layer.mlp_input.detach().float().cpu().numpy()
+            #         self.input_output_dict[f"layer_{layer_idx}_mlp_output"]=layer.mlp_output.detach().float().cpu().numpy()
+            #         if getattr(layer.self_attn,"q",None) is not None:
+            #             self.input_output_dict[f"layer_{layer_idx}_variance"]=layer.self_attn.norm.variance_res.detach().float().cpu().numpy()
+            #             self.input_output_dict[f"layer_{layer_idx}_q"]=layer.self_attn.q.detach().float().cpu().numpy()
+            #             self.input_output_dict[f"layer_{layer_idx}_k"]=layer.self_attn.k.detach().float().cpu().numpy()
+            #             self.input_output_dict[f"layer_{layer_idx}_v"]=layer.self_attn.v.detach().float().cpu().numpy()
+            #             self.input_output_dict[f"layer_{layer_idx}_attn_input"]=layer.self_attn.input_hidden_states.detach().float().cpu().numpy()
+            #             self.input_output_dict[f"layer_{layer_idx}_qkv_res"]=layer.self_attn.qkv.detach().float().cpu().numpy()
+            #         if getattr(layer.self_attn,"decode_kv",None) is not None:
+            #             self.input_output_dict[f"layer_{layer_idx}_decode_kv"]=layer.self_attn.decode_kv.detach().float().cpu().numpy()
+            #             self.input_output_dict[f"layer_{layer_idx}_decode_kv_state"]=layer.self_attn.decode_kv_state.detach().float().cpu().numpy()
+            #             self.input_output_dict[f"layer_{layer_idx}_decode_qkv"]=layer.self_attn.decode_qkv.detach().float().cpu().numpy()
+            #             self.input_output_dict[f"layer_{layer_idx}_decode_q"]=layer.self_attn.decode_q.detach().float().cpu().numpy()
+            
+            # if layer_idx==0:
+            #     print("trt layer_0 ep rank0 exeperts list len",len(layer.mlp.experts))
+            #     self.input_output_dict[f"layer_{layer_idx}_mlp_weights_gate_input"]=layer.mlp.gate_input.detach().float().cpu().numpy()
+            #     self.input_output_dict[f"layer_{layer_idx}_mlp_weights_gate_output"]=layer.mlp.gate_output.detach().float().cpu().numpy()
+            #     self.input_output_dict[f"layer_{layer_idx}_mlp_token_selected_experts"]=layer.mlp.experts.token_selected_experts.detach().float().cpu().numpy()
+            #     self.input_output_dict[f"layer_{layer_idx}_mlp_token_final_scales"]=layer.mlp.experts.token_final_scales.detach().float().cpu().numpy()
+            #     for i in range(layer.mlp.num_experts):
+            #         # Check if the expert is not an Identity module (placeholder for unused experts in EP)
+            #         if not isinstance(layer.mlp.experts[i], nn.Identity) and layer.mlp.experts[i].gate_up_proj_res_input is not None:
+            #             self.input_output_dict[f"layer_{layer_idx}_mlp_expert_{i}_gate_up_proj_input"]=layer.mlp.experts[i].gate_up_proj_res_input.detach().float().cpu().numpy()
+            #             self.input_output_dict[f"layer_{layer_idx}_mlp_expert_{i}_gate_up_proj_res"]=layer.mlp.experts[i].gate_up_proj_res.detach().float().cpu().numpy()
+            #             self.input_output_dict[f"layer_{layer_idx}_mlp_expert_{i}_down_proj_res"]=layer.mlp.experts[i].down_proj_res.detach().float().cpu().numpy()
+                    
+            #         else:
+            #             print("trt layer_idx",layer_idx,"rank",self.ep_rank,"expert",i,"is an Identity module")
+            #     # Get MoE gate (router) weights
+            #     if hasattr(layer.mlp, 'gate') and hasattr(layer.mlp.gate, 'weight'):
+            #         self.input_output_dict[f"layer_{layer_idx}_moe_gate_weight"]=layer.mlp.gate.weight.detach().float().cpu().numpy()
                 
-                # Get router logits if available (set during forward pass)
-                if hasattr(layer.mlp, 'router_logits') and layer.mlp.router_logits is not None:
-                    self.input_output_dict[f"layer_{layer_idx}_moe_router_logits"]=layer.mlp.router_logits.detach().float().cpu().numpy()
+            #     # Get router logits if available (set during forward pass)
+            #     if hasattr(layer.mlp, 'router_logits') and layer.mlp.router_logits is not None:
+            #         self.input_output_dict[f"layer_{layer_idx}_moe_router_logits"]=layer.mlp.router_logits.detach().float().cpu().numpy()
                     
                 #exit()
         # Final layer norm
@@ -1650,8 +1641,8 @@ class MiniMaxText01ForCausalLM(DecoderModelForCausalLM[MiniMaxText01Model, MiniM
     ) -> torch.Tensor:
         """Forward pass with cache management support"""
         # Forward through model
-        if self.model.tp_rank == 0 and self.model.ep_rank == 0 and attn_metadata.kv_cache_params.num_cached_tokens_per_seq[0]==4:
-            print("trt input ids is",input_ids)
+        # if self.model.tp_rank == 0 and self.model.ep_rank == 0 and attn_metadata.kv_cache_params.num_cached_tokens_per_seq[0]==4:
+        #     print("trt input ids is",input_ids)
         hidden_states = self.model(
             attn_metadata=attn_metadata,
             input_ids=input_ids,
@@ -1668,16 +1659,16 @@ class MiniMaxText01ForCausalLM(DecoderModelForCausalLM[MiniMaxText01Model, MiniM
         #     exit()
         # Compute logits
         logits = self.compute_logits(hidden_states, attn_metadata, return_context_logits)
-        print("trt save debug attn_metadata",attn_metadata)
-        if self.model.tp_rank == 0 and self.model.ep_rank == 0 and attn_metadata.kv_cache_params.num_cached_tokens_per_seq[0]==4:
-            #save the per layer input output to a npz file
+        #print("trt save debug attn_metadata",attn_metadata)
+        # if self.model.tp_rank == 0 and self.model.ep_rank == 0 and attn_metadata.kv_cache_params.num_cached_tokens_per_seq[0]==4:
+        #     #save the per layer input output to a npz file
             
-            print("trt save layer input output to npz file")
-            for key,value in self.model.input_output_dict.items():
-                print("trt key",key,value.shape)
-            self.model.input_output_dict["logits"]=logits.detach().float().cpu().numpy()
-            import numpy as np
-            np.savez(f"layer_input_output.npz",**self.model.input_output_dict)
+        #     print("trt save layer input output to npz file")
+        #     for key,value in self.model.input_output_dict.items():
+        #         print("trt key",key,value.shape)
+        #     self.model.input_output_dict["logits"]=logits.detach().float().cpu().numpy()
+        #     import numpy as np
+        #     np.savez(f"layer_input_output.npz",**self.model.input_output_dict)
         return logits
         
     def copy_inputs_before_cuda_graphs(
@@ -1779,7 +1770,7 @@ class MiniMaxText01ForCausalLM(DecoderModelForCausalLM[MiniMaxText01Model, MiniM
                 #pass
             # Handle MoE specific weights
             elif "block_sparse_moe" in name:
-                print("hf block_sparse_moe",name)
+                #print("hf block_sparse_moe",name)
                 if self.model_config.moe_backend == "cutlass":
                     new_name = name.replace("block_sparse_moe", "mlp")
                 
