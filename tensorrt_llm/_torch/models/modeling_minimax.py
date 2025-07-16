@@ -1889,3 +1889,8 @@ class MiniMaxText01ForCausalLM(DecoderModelForCausalLM[MiniMaxText01Model, MiniM
             "use_cache": kwargs.get("use_cache", True),
             "attention_mask": attention_mask,
         }
+        
+@register_auto_model("MiniMaxM1ForCausalLM")
+class MiniMaxM1ForCausalLM(MiniMaxText01ForCausalLM):
+    def __init__(self, model_config: ModelConfig[MiniMaxText01Config], **kwargs):
+        super().__init__(model_config, **kwargs)

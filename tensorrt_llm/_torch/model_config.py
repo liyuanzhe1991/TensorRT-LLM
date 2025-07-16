@@ -184,7 +184,7 @@ class ModelConfig(Generic[TConfig]):
 
         # Special handling for MiniMax models
         if hasattr(pretrained_config, "architectures") and pretrained_config.architectures:
-            if "MiniMaxText01ForCausalLM" in pretrained_config.architectures[0]:
+            if "MiniMax" in pretrained_config.architectures[0]:
                 # Convert attn_type_list to decoder_attention_types for MiniMax
                 if hasattr(pretrained_config, 'attn_type_list') and not hasattr(pretrained_config, 'decoder_attention_types'):
                     pretrained_config.decoder_attention_types = pretrained_config.attn_type_list

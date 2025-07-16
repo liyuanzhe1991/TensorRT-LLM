@@ -354,31 +354,31 @@ class TestMiniMax(unittest.TestCase):
         # 注册钩子
         # HF 模型钩子
         # HF 模型钩子 - 按操作注册
-        hf_minimax.model.embed_tokens.register_forward_hook(get_hf_hook("embed_tokens"))
-        for i, layer in enumerate(hf_minimax.model.layers):
-            # 注册层输入的钩子
-            layer.register_forward_hook(get_hf_hook(f"layer_{i}"))
-            layer.block_sparse_moe.register_forward_hook(get_hf_hook(f"layer_{i}_mlp"))
-            layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_attn"))
-            layer.register_forward_hook(get_hf_hook(f"layer_{i}_mlp_input"))
-            if (i+1)%8!=0:
-                layer.self_attn.norm.register_forward_hook(get_hf_hook(f"layer_{i}_variance"))
-                layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_lightning_output"))
-                layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_attn_input"))
-                #layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_attn_norm_output"))
-                layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_q"))
-                layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_k"))
-                layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_v"))
-                layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_qkv"))
-                layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_qkv_res"))
+        # hf_minimax.model.embed_tokens.register_forward_hook(get_hf_hook("embed_tokens"))
+        # for i, layer in enumerate(hf_minimax.model.layers):
+        #     # 注册层输入的钩子
+        #     layer.register_forward_hook(get_hf_hook(f"layer_{i}"))
+        #     layer.block_sparse_moe.register_forward_hook(get_hf_hook(f"layer_{i}_mlp"))
+        #     layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_attn"))
+        #     layer.register_forward_hook(get_hf_hook(f"layer_{i}_mlp_input"))
+        #     if (i+1)%8!=0:
+        #         layer.self_attn.norm.register_forward_hook(get_hf_hook(f"layer_{i}_variance"))
+        #         layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_lightning_output"))
+        #         layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_attn_input"))
+        #         #layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_attn_norm_output"))
+        #         layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_q"))
+        #         layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_k"))
+        #         layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_v"))
+        #         layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_qkv"))
+        #         layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_qkv_res"))
                 
-                layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_decode_kv"))
-                layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_decode_kv_state"))
-                layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_decode_qkv"))
-                layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_decode_q"))
+        #         layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_decode_kv"))
+        #         layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_decode_kv_state"))
+        #         layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_decode_qkv"))
+        #         layer.self_attn.register_forward_hook(get_hf_hook(f"layer_{i}_decode_q"))
                 
-                layer.register_forward_hook(get_hf_hook(f"layer_{i}_layernorm_output"))
-                layer.register_forward_hook(get_hf_hook(f"layer_{i}_layernorm_input"))
+        #         layer.register_forward_hook(get_hf_hook(f"layer_{i}_layernorm_output"))
+        #         layer.register_forward_hook(get_hf_hook(f"layer_{i}_layernorm_input"))
         # TRT 模型钩子 - 按操作注册
         
             

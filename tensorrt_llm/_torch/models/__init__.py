@@ -24,7 +24,7 @@ from .modeling_siglip import SiglipVisionModel
 from .modeling_utils import get_model_architecture
 from .modeling_vila import VilaModel
 from .modeling_minimax import (MiniMaxText01Config, MiniMaxText01ForCausalLM,
-                               MiniMaxText01Model)
+                               MiniMaxText01Model,MiniMaxM1ForCausalLM)
 
 # Note: for better readiblity, this should have same order as imports above
 __all__ = [
@@ -56,6 +56,7 @@ __all__ = [
     "MiniMaxText01Config",
     "MiniMaxText01Model",
     "MiniMaxText01ForCausalLM",
+    "MiniMaxM1ForCausalLM",
 ]
 
 if transformers.__version__ >= "4.45.1":
