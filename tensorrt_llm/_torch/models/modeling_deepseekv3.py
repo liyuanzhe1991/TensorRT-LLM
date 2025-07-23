@@ -1166,6 +1166,7 @@ class DeepseekV3ForCausalLM(DecoderModelForCausalLM[DeepseekV3Model,
         return_context_logits: bool = False,
         **kwargs,
     ) -> torch.Tensor:
+        print(f"attn_metadata debug on rank : {self.model_config.mapping.tp_rank}, attn_metadata: {attn_metadata}")
         attn_metadata.num_generations_per_batch = self.model_nextn + 1
         hidden_states = self.model(
             input_ids=input_ids,

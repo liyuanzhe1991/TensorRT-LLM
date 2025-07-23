@@ -676,7 +676,7 @@ class LLM:
             self._executor_config.cache_transceiver_config = PybindMirror.maybe_to_pybind(
                 self.args.cache_transceiver_config)
         from tensorrt_llm._torch.pyexecutor.config import update_executor_config
-        update_executor_config(
+        update_executor_config( 
             self._executor_config,
             backend=self.args.backend,
             pytorch_backend_config=self.args.get_pytorch_backend_config()

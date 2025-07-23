@@ -345,6 +345,7 @@ class PyTorchModelEngine(ModelEngine):
         self.max_seq_len = max_seq_len
 
         self.mapping = mapping
+        print("mapping",mapping)
         if mapping.has_pp():
             init_pp_comm(mapping)
         self.dist = dist
@@ -1155,6 +1156,7 @@ class PyTorchModelEngine(ModelEngine):
 
         # if new_tensors_device exist, input_ids will only contain new context tokens
         #print(f"[DEBUG] _prepare_tp_inputs scheduled_requests.context_requests: {scheduled_requests.context_requests}, scheduled_requests.generation_requests: {scheduled_requests.generation_requests}, new_tensors_device: {new_tensors_device}   ")
+        #print(f"[DEBUG] _prepare_tp_inputs attn_metadata: {attn_metadata}")
         input_ids = []
         sequence_lengths = []
         prompt_lengths = []
@@ -1317,6 +1319,7 @@ class PyTorchModelEngine(ModelEngine):
                 range(len(position_ids),
                       len(position_ids) + len(generation_requests))))
         for request in generation_requests:
+            print(f"[DEBUG] _prepare_tp_inputs generation_requests request: {request.py_request_id}, request.py_prompt_len: {request.py_prompt_len}")
             # the request has no previous tensor:
             # (1) new_tokens_device is None, which means overlap scheduler is disabled; or
             # (2) a dummy request; or
@@ -2016,6 +2019,7 @@ class PyTorchModelEngine(ModelEngine):
                 gather_context_logits: bool = False):
 
         #print("forward schedule_requests context_requests: ", len(scheduled_requests.context_requests))
+        
         kv_cache_manager = resource_manager.get_resource_manager(
             self.kv_cache_manager_key)
 
