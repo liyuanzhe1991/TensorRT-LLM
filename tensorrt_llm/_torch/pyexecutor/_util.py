@@ -152,7 +152,7 @@ class KvCacheCreator:
         # estimate_max_kv_cache_tokens submits self._dummy_reqs
         num_cache_blocks = 0
         num_extra_tokens_per_seq = 1  # account for generated tokens
-        spec_cfg = executor_config.speculative_config
+        spec_cfg = getattr(executor_config, 'speculative_config', None)
         if spec_cfg is not None:
             num_extra_tokens_per_seq += spec_cfg.max_draft_tokens
             num_extra_tokens_per_seq += spec_cfg.num_extra_kv_tokens
@@ -266,7 +266,7 @@ class KvCacheCreator:
 
         config = model_engine.model.model_config.pretrained_config
         quant_config = model_engine.model.model_config.quant_config
-        spec_config = executor_config.speculative_config
+        spec_config = getattr(executor_config, 'speculative_config', None)
 
         hidden_size = config.hidden_size
         num_attention_heads = config.num_attention_heads

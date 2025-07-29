@@ -785,9 +785,9 @@ class MiniMaxText01LinearAttention(nn.Module):
             # print("trt q_decay",q_decay.shape,q_decay.dtype,q_decay.device)
             # print("trt m",m)
             #print("trt kv",kv.shape,kv.dtype,kv.device)
-            qkv_none_diag = torch.matmul(qi * q_decay[:, :m], kv.unsqueeze(0)).to(torch.float32)
+            qkv_none_diag = torch.matmul(qi * q_decay[:, :m], kv.unsqueeze(0)).to(torch.float32)#inter blcok
          
-            qk = torch.matmul(qi, ki.transpose(-1, -2)).to(torch.float32) * diag_decay[:, :, :m, :m]
+            qk = torch.matmul(qi, ki.transpose(-1, -2)).to(torch.float32) * diag_decay[:, :, :m, :m]#
             qkv_diag = torch.matmul(qk, vi.to(torch.float32))
 
             # Combine outputs
