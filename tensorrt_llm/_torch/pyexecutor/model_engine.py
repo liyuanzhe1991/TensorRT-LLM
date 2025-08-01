@@ -736,6 +736,9 @@ class PyTorchModelEngine(ModelEngine):
                             self.forward(batch,
                                          new_tensors_device=None,
                                          resource_manager=resource_manager)
+                            #for minimax, we need to free the cache manager
+                            if "MiniMax" in self.model.__class__.__name__:
+                                self.model.model.linear_cache_resource_manager.free_all_resources()
                             torch.cuda.synchronize()
 
                     logger.info(f"Autotuner Cache size after warmup " +

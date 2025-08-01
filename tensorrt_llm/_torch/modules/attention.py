@@ -184,7 +184,7 @@ class Attention(nn.Module):
                 head_dim=self.head_dim,
                 is_neox=self.pos_embd_params.is_neox,
             )
-      
+
          
 
          
@@ -341,7 +341,8 @@ class Attention(nn.Module):
         self.v_pre_rope = v
         # If RoPE is fused into the attention OP, do not apply RoPE here.
         if not self.rope_fusion and position_ids is not None:
-            q, k = self.rotary_emb(q,k,v,position_ids,k.shape[-2])
+            #q, k = self.rotary_emb(q,k,v,position_ids,k.shape[-2])
+            q, k = self.rotary_emb(position_ids, [q, k])
         self.q_post_rope = q
         self.k_post_rope = k
         self.v_post_rope = v

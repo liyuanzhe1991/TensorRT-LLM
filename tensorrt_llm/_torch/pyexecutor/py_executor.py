@@ -154,7 +154,7 @@ class BatchState:
 
 @dataclasses.dataclass
 class BatchStatePP(BatchState):
-    microbatch_id: int = -1
+    microbatch_id: int = -1 
 
 
 class PyExecutor:
@@ -207,7 +207,7 @@ class PyExecutor:
         self.active = True
         self.next_req_id = max_batch_size  # The first max_batch_size request IDs are reserved for dummy requests
         self.max_draft_tokens = max_draft_tokens
-        self.print_log = model_engine.pytorch_backend_config.print_iter_log
+        self.print_log = True
         self.enable_iter_perf_stats = model_engine.pytorch_backend_config.enable_iter_perf_stats
         self.enable_iter_req_stats = model_engine.pytorch_backend_config.enable_iter_req_stats
         self.num_fetch_requests_cur_rank = 0
@@ -489,7 +489,7 @@ class PyExecutor:
 
                 formatted_timestamp = datetime.datetime.now().strftime(
                     "%Y-%m-%d %H:%M:%S")
-                logger.info(
+                print(
                     f"iter = {self.model_engine.iter_counter}, "
                     f"global_rank = {self.global_rank}, "
                     f"rank = {self.dist.rank}, "
@@ -1940,10 +1940,11 @@ class PyExecutor:
         self._enqueue_responses(error_responses)
 
     def _terminate_request(self, request: LlmRequest):
-        print(f"rank {self.dist.rank} terminate_request: request: {request} model_engine: {self.model_engine.model.__class__.__name__ }")
+        
         self.resource_manager.free_resources(request)
         # todo: free linear cache
         if "MiniMax" in self.model_engine.model.__class__.__name__:
+            logger.info(f"rank {self.dist.rank} terminate_request: request: {request} model_engine: {self.model_engine.model.__class__.__name__ }")
             self.linear_cache_resource_manager.free_resources(request.request_id)
     @nvtx_range("_handle_cancelled_requests")
     def _handle_cancelled_requests(self):

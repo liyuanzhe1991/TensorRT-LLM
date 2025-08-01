@@ -3,6 +3,7 @@ MiniMaxText01 model implementation for TensorRT-LLM torchflow
 """
 import copy
 import math
+import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -127,13 +128,16 @@ class MiniMaxLinearCacheManager:
     
     def free_seq(self, seq_id: int):
         """Free the cache slot used by a sequence"""
-        #print("trt free_seq",seq_id)
+        logger.info(f"minimax cache manager free_seq {seq_id} before_free_slots {self.free_slots} ")
         if seq_id in self.seq_id_to_slot_idx.keys():
             slot_idx = self.seq_id_to_slot_idx[seq_id]
             del self.seq_id_to_slot_idx[seq_id]
             self.free_slots.append(slot_idx)
             # Clear the cache slot
             self.cache[:, slot_idx].zero_()
+            #print(f"after_free_slots {self.free_slots}")
+        else:
+            logger.warning(f"seq_id {seq_id} not found in seq_id_to_slot_idx")
     
     def clear_all(self):
         """Clear all cache slots and mappings"""
@@ -203,6 +207,10 @@ class MiniMaxLinearCacheResourceManager:
             'max_slots': self.linear_cache_manager.max_batch_size,
             'seq_id_to_slot_mapping': dict(self.linear_cache_manager.seq_id_to_slot_idx),
         }
+        
+    def free_all_resources(self):
+        """Free all resources"""
+        self.linear_cache_manager.clear_all()
         
     def shutdown(self):
         """Clean up resources on shutdown"""
@@ -478,19 +486,20 @@ class MiniMaxText01LinearAttention(nn.Module):
         self.norm = MiniMaxText01RMSNormTP(self.hidden_inner_size, eps=config.rms_norm_eps, mapping=model_config.mapping)
         
         # Build slope tensor on the correct device
-        slope_rate = self._build_slope_tensor(self.num_heads)
-        #print("trt slope_rate",slope_rate.shape)
+        slope_rate,start = self._build_slope_tensor(self.num_heads)
         
+        #print("trt slope_rate",slope_rate.shape)
+        self.start=start
+        #print("trt slope_rate before",slope_rate.shape,slope_rate.dtype,slope_rate.device)
         self.slope_rate = slope_rate * (1 - layer_idx / (80 - 1) + 1e-5)
+        #print("trt slope_rate",self.slope_rate.shape,self.slope_rate.dtype,self.slope_rate.device)
         # self.tp_slope = self.slope_rate[self.tp_rank *
         #                                 self.tp_heads:(self.tp_rank + 1) *
         #                                 self.tp_heads].contiguous()
         # Move to GPU and make it a buffer (not a parameter)
         self.register_buffer('tp_slope', 
                            self.slope_rate[self.tp_rank * self.tp_heads:(self.tp_rank + 1) * self.tp_heads].contiguous())
-        #print("trt tp_slope",self.tp_slope.shape)
-        #reset tp_slope to 1
-        #self.tp_slope.fill_(1)
+        
         
         self.q=None
         self.k=None
@@ -506,13 +515,17 @@ class MiniMaxText01LinearAttention(nn.Module):
         self.decode_qkv=None
         self.decode_q=None
         
+        # Check environment variable to decide whether to use naive linear attention
+        self.use_navie_linear = os.getenv('USE_NAVIE_LINEAR', '1') == '1'
+        
     @staticmethod
     def _build_slope_tensor(n_attention_heads: int):
         def get_slopes(n):
             def get_slopes_power_of_2(n):
                 start = 2**(-(2**-(math.log2(n) - 3)))
+                #print("build slope tensor",start)
                 ratio = start
-                return [start * ratio**i for i in range(n)]
+                return [start * ratio**i for i in range(n)],start
 
             if math.log2(n).is_integer():
                 return get_slopes_power_of_2(n)
@@ -520,9 +533,11 @@ class MiniMaxText01LinearAttention(nn.Module):
                 closest_power_of_2 = 2**math.floor(math.log2(n))
                 return (get_slopes_power_of_2(closest_power_of_2) + 
                         get_slopes(2 * closest_power_of_2)[0::2][:n - closest_power_of_2])
-
-        slopes = torch.tensor(get_slopes(n_attention_heads), dtype=torch.float32).reshape(n_attention_heads, 1, 1)
-        return slopes
+        slopes,start = get_slopes(n_attention_heads)
+        slopes = torch.tensor(slopes, dtype=torch.float32).reshape(n_attention_heads, 1, 1)
+        #slopes.fill_(1)
+        #start=1
+        return slopes,start
         
     def forward(
         self,
@@ -609,9 +624,23 @@ class MiniMaxText01LinearAttention(nn.Module):
         # Lightning Attention inherently implements causal masking through its cumulative design
         # The causal mask is implicit in the algorithm: at position i, we only have access to
         # the accumulated KV state from positions 0 to i-1, plus the current position i
-        if hasattr(attn_metadata, 'num_contexts') and attn_metadata.num_contexts > 0:
-            output = self._prefill_forward(q, k, v, kv_cache, state_indices, attn_metadata)
+        total_request_ids=len(getattr(attn_metadata, 'request_ids', []))
+        if total_request_ids == 0:
+            raise ValueError("no input request")
+        num_contexts=getattr(attn_metadata, 'num_contexts', 0)
+        
+        # if self.tp_rank == 0:    
+        #     print(f"rank 0 layer {self.linear_layer_idx} state_indices {state_indices}")
+        if num_contexts > 0:
+            # Check if this is a mixed batch (both prefill and decode)
+            if total_request_ids - num_contexts > 0:
+         
+                output = self._mixed_forward(q, k, v, kv_cache, state_indices, attn_metadata)
+            else:
+           
+                output = self._prefill_forward(q, k, v, kv_cache, state_indices, attn_metadata)
         else:
+         
             output = self._decode_forward(q, k, v, kv_cache, state_indices, attn_metadata)
         
         output_with_heads = output.reshape(output.shape[0], -1)
@@ -680,7 +709,7 @@ class MiniMaxText01LinearAttention(nn.Module):
             
         return torch.cat(outputs, dim=0) if outputs else torch.empty((0, self.tp_heads * self.head_dim), device=q.device, dtype=q.dtype)
     
-    def _decode_forward(
+    def     _decode_forward(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -692,11 +721,22 @@ class MiniMaxText01LinearAttention(nn.Module):
         """Handle decode phase with single token per sequence"""
         outputs = []
         
-        # Process each sequence
+      
+        if state_indices is not None and len(state_indices) != len(attn_metadata.request_ids):
+            raise RuntimeError(
+                f"Mismatch: state_indices length {len(state_indices)} != num_active_seqs {len(attn_metadata.request_ids)}. "
+                f"This should have been handled in the forward() method."
+            )
+        
+        # Process each active sequence
+        state_indices=state_indices.clone().cpu().tolist()
         for seq_idx in range(len(attn_metadata.request_ids)):
             # Get cache slot for this sequence
-            
-            cache_idx = state_indices[seq_idx].item() if state_indices is not None else seq_idx
+            if state_indices is not None:
+             
+                cache_idx = state_indices[seq_idx]
+            else:
+                cache_idx = seq_idx
             
             # Ensure cache_idx is within bounds
             if cache_idx >= kv_cache.shape[0]:
@@ -704,6 +744,14 @@ class MiniMaxText01LinearAttention(nn.Module):
             
             # Process single token for this sequence
             # In decode phase, each sequence has exactly one new token
+            
+            # Validate seq_idx is within bounds for q, k, v
+            if seq_idx >= q.shape[0]:
+                raise RuntimeError(
+                    f"[RANK {self.tp_rank}] seq_idx {seq_idx} is out of bounds for q with shape {q.shape}. "
+                    f"This should not happen as seq_idx < num_active_seqs={len(attn_metadata.request_ids)}"
+                )
+            
             #print("trt decode seq_idx",seq_idx,"cache_idx",cache_idx)
             seq_output = self._lightning_attention_decode(
                 q[seq_idx:seq_idx+1],  # [1, tp_heads, head_dim]
@@ -713,8 +761,70 @@ class MiniMaxText01LinearAttention(nn.Module):
                 self.tp_slope
             )
             outputs.append(seq_output)
+    
+        result = torch.cat(outputs, dim=0)
+          
+        return result
+    
+    def _mixed_forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        kv_cache: torch.Tensor,
+        state_indices: Optional[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
+        """Handle mixed batch with both prefill and decode requests"""
+        #print("trt mixed forward")
+        outputs = []
         
-        return torch.cat(outputs, dim=0)
+        # We need to identify which requests are prefill and which are decode
+        # Typically, requests with seq_len > 1 are prefill, seq_len == 1 are decode
+        start = 0
+        
+        # Get sequence lengths
+        if hasattr(attn_metadata, 'seq_lens'):
+            seq_lens = attn_metadata.seq_lens
+        else:
+            raise ValueError("seq_lens is not found in attn_metadata")
+        
+        # Process each sequence
+        for seq_idx in range(len(attn_metadata.request_ids)):
+            seq_len = seq_lens[seq_idx]
+            end = start + seq_len
+            
+            # Get cache slot for this sequence
+            cache_idx = state_indices[seq_idx] if state_indices is not None else seq_idx
+            
+            if seq_len > 1:
+                # This is a prefill request
+                seq_q = q[start:end]  # [seq_len, tp_heads, head_dim]
+                seq_k = k[start:end]  # [seq_len, tp_heads, head_dim]
+                seq_v = v[start:end]  # [seq_len, tp_heads, head_dim]
+                
+                # Process with Lightning Attention (causal masking is implicit)
+                seq_output = self._lightning_attention_forward(
+                    seq_q,
+                    seq_k,
+                    seq_v,
+                    kv_cache[cache_idx],
+                    self.tp_slope
+                )
+            else:
+                # This is a decode request (single token)
+                seq_output = self._lightning_attention_decode(
+                    q[start:end],  # [1, tp_heads, head_dim]
+                    k[start:end],  # [1, tp_heads, head_dim]
+                    v[start:end],  # [1, tp_heads, head_dim]
+                    kv_cache[cache_idx],
+                    self.tp_slope
+                )
+            
+            outputs.append(seq_output)
+            start = end
+        
+        return torch.cat(outputs, dim=0) if outputs else torch.empty((0, self.tp_heads * self.head_dim), device=q.device, dtype=q.dtype)
     
     def _lightning_attention_forward(
         self,
@@ -726,7 +836,87 @@ class MiniMaxText01LinearAttention(nn.Module):
     ) -> torch.Tensor:
         """Lightning attention for prefill with block-wise processing and causal masking"""
         #print(q.shape)
-        slope_rate = slope_rate.to(torch.float32)
+        #if env param use_navie_linear the use following code
+        if self.use_navie_linear:
+            return self._lightning_attention_forward_navie(q, k, v, kv_state, slope_rate)
+        else:
+            
+            return self._lightning_attention_forward_block(q, k, v, kv_state, slope_rate)
+    def _lightning_attention_forward_block(
+        self,
+        q: torch.Tensor,  # [seq_len, tp_heads, head_dim]
+        k: torch.Tensor,  # [seq_len, tp_heads, head_dim]
+        v: torch.Tensor,  # [seq_len, tp_heads, head_dim]
+        kv_state: torch.Tensor,  # [tp_heads, head_dim, head_dim]
+        slope_rate: torch.Tensor,
+    ) -> torch.Tensor:
+        """Lightning attention for prefill using torch.ops.trtllm.linear_attention_prefill"""
+        # Get dimensions
+        seq_len = q.shape[0]
+        num_heads = q.shape[1]  # tp_heads
+        head_dim = q.shape[2]
+        print("seq_len",seq_len,"num_heads",num_heads,"head_dim",head_dim)
+        # Prepare for batch processing
+        # The test file shows batch_size = 2, but here we process as single batch
+        batch_size = 1
+        
+        # Reshape tensors to match expected format: [batch_size * seq_len, num_heads, head_dim]
+        # Currently: [seq_len, tp_heads, head_dim]
+        # No need to reshape as the input is already in the correct format for single batch
+        
+        # Create output tensor
+        output = torch.zeros_like(q)
+        
+        # Create cumulative sequence lengths
+        # For single sequence: [0, seq_len]
+        cu_seq_lens = torch.tensor([0, seq_len], dtype=torch.int64, device=q.device)
+        
+        # Ensure kv_state is in float32 for numerical stability
+        kv_state_f32 = kv_state.float()
+        
+        # Calculate scale factor
+        scale = 1
+        
+        #decay = torch.exp(-slope_rate.mean()).item()
+        decay =  self.start
+        print("trt decay",decay)
+        # Call the custom linear attention prefill operation
+        #try:
+        torch.ops.trtllm.linear_attention_prefill(
+            output,           # output tensor
+            kv_state_f32,     # state tensor (will be updated in-place)
+            q,                # query tensor
+            k,                # key tensor
+            v,                # value tensor
+            cu_seq_lens,      # cumulative sequence lengths
+            batch_size,       # batch size
+            num_heads,        # number of heads (tp_heads)
+            num_heads,        # number of kv heads (same as num_heads for this implementation)
+            head_dim,         # head dimension
+            scale,            # scale factor
+            decay             # decay factor
+        )
+        
+        # Update the original kv_state with the modified state
+        kv_state.copy_(kv_state_f32.to(kv_state.dtype))
+            
+    
+        #reshape output to [seq_len, tp_heads, head_dim]
+        print("block output",output.shape,output.dtype,output.device)
+        output = output.reshape(-1, num_heads*head_dim)
+        return output
+        
+    def _lightning_attention_forward_navie(
+        self,
+        q: torch.Tensor,  # [seq_len, tp_heads, head_dim]
+        k: torch.Tensor,  # [seq_len, tp_heads, head_dim]
+        v: torch.Tensor,  # [seq_len, tp_heads, head_dim]
+        kv_state: torch.Tensor,  # [tp_heads, head_dim, head_dim]
+        slope_rate: torch.Tensor,
+    ) -> torch.Tensor:
+        #print("trt _lightning_attention_forward_navie slope_rate",slope_rate.shape,slope_rate.dtype,slope_rate.device)
+        #slope_rate = slope_rate.to(device=q.device, dtype=torch.float32)
+        
         seq_len = q.shape[0]  # n
         num_heads = q.shape[1]  # h
         head_dim = q.shape[2]  # d
@@ -736,11 +926,11 @@ class MiniMaxText01LinearAttention(nn.Module):
        
         
         # Reshape to match HF format: [1, h, n, d]
-        q = q.transpose(0, 1).unsqueeze(0)  # [1, h, n, d]
-        k = k.transpose(0, 1).unsqueeze(0)  # [1, h, n, d]
-        v = v.transpose(0, 1).unsqueeze(0)  # [1, h, n, d]
-        
-        
+        q = q.transpose(0, 1).unsqueeze(0).to(torch.float32)  # [1, h, n, d]
+        k = k.transpose(0, 1).unsqueeze(0).to(torch.float32)  # [1, h, n, d]
+        v = v.transpose(0, 1).unsqueeze(0).to(torch.float32)  # [1, h, n, d]
+        slope_rate = slope_rate.to(torch.float32)
+        #print("trt slope_rate",slope_rate.shape,slope_rate.dtype,slope_rate.device)
         b, h, n, d = q.shape
         e = v.shape[-1]
         
@@ -752,9 +942,6 @@ class MiniMaxText01LinearAttention(nn.Module):
         array = torch.arange(BLOCK).to(q.device) + 1
         q_decay = torch.exp(-slope_rate * array.reshape(-1, 1))
         k_decay = torch.exp(-slope_rate * (BLOCK - array.reshape(-1, 1)))
-        #print("trt qdecay ... layer",self.layer_idx,q_decay.shape,q_decay)
-        #rint("trt kdecay ... layer",self.layer_idx,k_decay.shape,k_decay)
-        # Diagonal decay matrix
         index = array[:, None] - array[None, :]
         s_index = slope_rate * index[None, None,]
         s_index = torch.where(index >= 0, -s_index, float("-inf"))
@@ -762,7 +949,7 @@ class MiniMaxText01LinearAttention(nn.Module):
         
         #self.diag_decay=diag_decay
         # Initialize KV state
-        kv = kv_state.float()  # [h, d, e]
+        kv = kv_state.to(torch.float32) # [h, d, e]
         output = torch.empty((b, h, n, e), dtype=q.dtype, device=q.device)
         
         # Process blocks
@@ -807,6 +994,7 @@ class MiniMaxText01LinearAttention(nn.Module):
         # if self.layer_idx==0 and self.tp_rank==0:
         #     print("layer {} rank {} trt kv_state prefill".format(self.layer_idx,self.tp_rank),kv_state.shape,kv_state.dtype,kv_state.device,kv_state.min(),kv_state.max(),kv_state.mean())
         # Convert back to original format and dtype
+        #print("navie output",output.shape,output.dtype,output.device)
         output = output.squeeze(0).transpose(0, 1).contiguous()  # [n, h, d]
         #output = output.to(orig_dtype)
         
@@ -969,11 +1157,13 @@ class MiniMaxText01RotaryEmbedding(nn.Module):
             self.sin_cached[:seq_len].to(dtype=torch.float32),
         )
     def forward(self, q: torch.Tensor, k: Optional[torch.Tensor],v:torch.Tensor,position_ids:torch.Tensor,seq_len:int,past_kv_len:int=0):
-        bsz = 1
+        #print("trt rotary emb forward q",q.shape,q.dtype)
+        bsz = 1 #FIXME this can cause problem when batch size is not 1
         q_len, _ = q.size()
         q = q.reshape(bsz, q_len,self.num_heads, self.head_dim).transpose(1, 2)
         k = k.reshape(bsz, q_len,self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = v.reshape(bsz, q_len,self.num_kv_heads, self.head_dim).transpose(1, 2)  
+        #print("trt rotary emb forward aft reshape q",q.shape,q.dtype)
         #self.q=q
         #self.k=k
         #self.v=v
@@ -998,6 +1188,7 @@ class MiniMaxText01RotaryEmbedding(nn.Module):
         #self.k_post_rope=k  
         q = q.transpose(1, 2).reshape(q_len, -1)
         k = k.transpose(1, 2).reshape(q_len, -1)
+        #print("trt rotary emb forward aft q",q.shape,q.dtype)
         return q, k
     
 class MiniMaxText01Attention(Attention):
@@ -1017,20 +1208,26 @@ class MiniMaxText01Attention(Attention):
             num_key_value_heads=config.num_key_value_heads or config.num_attention_heads,
             max_position_embeddings=config.max_position_embeddings,
             bias=getattr(config, 'attention_bias', False),
-            
+            pos_embd_params=PositionalEmbeddingParams(
+                type=PositionEmbeddingType.rope_gpt_neox,
+                is_neox=True,
+                rope=RopeParams.from_config(config),
+            ),
             layer_idx=layer_idx,
             dtype=config.torch_dtype,
             config=model_config,
         )
         
-        self.rotary_emb = MiniMaxText01RotaryEmbedding(
-            dim=config.rotary_dim,
-            max_position_embeddings=config.max_position_embeddings,
-            base=config.rope_theta,
-            head_dim=self.head_dim,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_key_value_heads,
-        )
+        # TODO this is minimax RotaryEmbedding implementation, need to be checked in the future
+        
+        # self.rotary_emb = MiniMaxText01RotaryEmbedding(
+        #     dim=config.rotary_dim,
+        #     max_position_embeddings=config.max_position_embeddings,
+        #     base=config.rope_theta,
+        #     head_dim=self.head_dim,
+        #     num_heads=self.num_heads,
+        #     num_kv_heads=self.num_key_value_heads,
+        # )
 
 
 class MiniMaxText01MoE(nn.Module):
@@ -1103,7 +1300,7 @@ class MiniMaxText01MoE(nn.Module):
                 # moe_instance.topk_values=routing_weights.to(router_logits.dtype)    
                 
                 #topk_values = topk_values.to(router_logits.dtype)
-                return topk_indices.to(torch.int32),routing_weights.to(router_logits.dtype)
+                return topk_indices.to(torch.int32),routing_weights.to(torch.float32)
                 
         return MiniMaxRoutingMethod(self.top_k)
         
@@ -1435,8 +1632,9 @@ class MiniMaxText01Model(DecoderModel):
         
         # Process through layers
         linear_layer_idx = 0
+        
         for layer_idx, layer in enumerate(self.layers):
-            # Get KV cache for linear attention if needed
+
             if hasattr(layer, 'attention_type') and layer.attention_type == 0:
                 if self.linear_cache_resource_manager is not None:
                     kv_cache = self.linear_cache_resource_manager.linear_cache_manager.get_layer_cache(linear_layer_idx)
@@ -1447,13 +1645,8 @@ class MiniMaxText01Model(DecoderModel):
             else:
                 kv_cache = None
             
-            # Forward through layer
-            #record the input output of each layer
-           
-            # if self.tp_rank == 0 and self.ep_rank == 0:
-               
-            #     self.input_output_dict[f"layer_{layer_idx}_input"]=hidden_states.detach().float().cpu().numpy()
-               
+        
+            
             hidden_states, residual = layer(
                 position_ids=position_ids,
                 hidden_states=hidden_states,
@@ -1771,7 +1964,7 @@ class MiniMaxText01ForCausalLM(DecoderModelForCausalLM[MiniMaxText01Model, MiniM
             # Handle MoE specific weights
             elif "block_sparse_moe" in name:
                 #print("hf block_sparse_moe",name)
-                if self.model_config.moe_backend == "cutlass":
+                if self.model_config.moe_backend == "CUTLASS":
                     new_name = name.replace("block_sparse_moe", "mlp")
                 
                     renamed_weights[new_name] = weight
