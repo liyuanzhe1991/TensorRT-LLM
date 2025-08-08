@@ -58,6 +58,7 @@ select_tensor(Tensor&& t) {
   }
 }
 
+
 template <
     int NumThreads,
     int HeadSize,
@@ -74,48 +75,54 @@ struct LinearAttentionPrefillPipeline {
 
   __forceinline__ __device__ static void
   attention(
-      TO* __restrict__ output,               // ["packed_seq", Hqo, dq]
-      TState* __restrict__ state,            // [num_seqs, Hkv, dv, dk], aka, KV, optional
-      TQKV const* __restrict__ q,            // ["packed_seq", Hqo, dq]
-      TQKV const* __restrict__ k,            // ["packed_seq", Hkv, dk]
-      TQKV const* __restrict__ v,            // ["packed_seq", Hkv, dv]
-      int64_t const* __restrict__ seq_lens,  // [num_seqs + 1], prefix scan of packed length of sequences in the batch
+      TO* __restrict__ output,                 // ["packed_seq", Hqo, dq]
+      TState* __restrict__ state,              // [num_seqs, Hkv, dv, dk], aka, KV, optional
+      TQKV const* __restrict__ q,              // ["packed_seq", Hqo, dq]
+      TQKV const* __restrict__ k,              // ["packed_seq", Hkv, dk]
+      TQKV const* __restrict__ v,              // ["packed_seq", Hkv, dv]
+      int64_t const* __restrict__ cu_seqlens,  // [num_seqs + 1], prefix scan of packed length of sequences in the batch
       int32_t num_seqs,
       int32_t num_qo_heads,
       int32_t num_kv_heads,
       float   scale,  // scaling on QK
-      float   decay
+      float   decay,
+      float const* per_head_decay,
+      int32_t decay_exponent_offset
   ) {
     int32_t const seq_idx     = blockIdx.x / num_qo_heads;
     int32_t const qo_head_idx = blockIdx.x % num_qo_heads;
     int32_t const kv_head_idx = qo_head_idx / (num_qo_heads / num_kv_heads);
 
-    int64_t const seq_offset = seq_lens[seq_idx];
-    int64_t const seq_len    = seq_lens[seq_idx + 1] - seq_offset;
+    int64_t const tok_offset = cu_seqlens[seq_idx];
+    int64_t const seq_len    = cu_seqlens[seq_idx + 1] - tok_offset;
     int64_t const num_blocks = ceil_div(seq_len, BlockSize);
 
     // #pragma region Partitioning
     // the last blocks of these tensors need special handling
     auto gO = make_tensor(
-        make_gmem_ptr(output + seq_offset * (num_qo_heads * HeadSize)),
+        make_gmem_ptr(output + tok_offset * (num_qo_heads * HeadSize)),
         make_layout(make_shape(Int<HeadSize>{}, num_qo_heads, Int<BlockSize>{}, num_blocks))
     )(_, qo_head_idx, _, _);  // (Dim, Tok, blk) -> idx, NOTE: Tok is token index in Block
     auto gQ = make_tensor(
-        make_gmem_ptr(q + seq_offset * (num_qo_heads * HeadSize)),
+        make_gmem_ptr(q + tok_offset * (num_qo_heads * HeadSize)),
         make_layout(make_shape(Int<HeadSize>{}, num_qo_heads, Int<BlockSize>{}, num_blocks))
     )(_, qo_head_idx, _, _);  // (Dim, Tok, blk) -> idx
     auto gK = make_tensor(
-        make_gmem_ptr(k + seq_offset * (num_kv_heads * HeadSize)),
+        make_gmem_ptr(k + tok_offset * (num_kv_heads * HeadSize)),
         make_layout(make_shape(Int<HeadSize>{}, num_kv_heads, Int<BlockSize>{}, num_blocks))
     )(_, kv_head_idx, _, _);  // (Dim, Tok, blk) -> idx
     auto gV = make_tensor(
-        make_gmem_ptr(v + seq_offset * (num_kv_heads * HeadSize)),
+        make_gmem_ptr(v + tok_offset * (num_kv_heads * HeadSize)),
         make_layout(make_shape(Int<HeadSize>{}, num_kv_heads, Int<BlockSize>{}, num_blocks))
     )(_, kv_head_idx, _, _);  // (Dim, Tok, blk) -> idx
     auto gKV = make_tensor(
         make_gmem_ptr(state),
         make_layout(make_shape(Int<HeadSize>{}, Int<HeadSize>{}, num_kv_heads, num_seqs))
-    )(_, _, kv_head_idx, seq_idx);  // (KDim, VDim), K-contiguous
+    )(_, _, per_head_decay ? qo_head_idx : kv_head_idx, seq_idx);  // (KDim, VDim), K-contiguous
+
+    if (per_head_decay != nullptr) {
+      decay = per_head_decay[qo_head_idx];
+    }
 
     extern __shared__ char dynamic_smem[];
 
@@ -125,7 +132,6 @@ struct LinearAttentionPrefillPipeline {
     auto sV   = make_tensor(make_smem_ptr(smem->v.data()), Smem::VLayout());    // (Dim, Tok, blk)
     auto sQK  = make_tensor(make_smem_ptr(smem->qk.data()), Smem::QKLayout());  // (KTok, QTok), K-contiguous
 
-    auto sKV_acc = make_tensor(make_smem_ptr(smem->kv_acc.data()), Smem::KVAccLayout());  // (KDim, VDim), K-contiguous
     auto sKV_opd = make_tensor(make_smem_ptr(smem->kv_opd.data()), Smem::KVOpdLayout());  // (KDim, VDim), K-contiguous
 
     auto const  cQ  = make_identity_tensor(Shape<Int<HeadSize>, Int<BlockSize>>{});
@@ -192,8 +198,6 @@ struct LinearAttentionPrefillPipeline {
     auto tKVrV_thr_copy = make_tiled_copy_A(typename KV::S2R{}, kv_tiled_mma).get_thread_slice(threadIdx.x);
     auto tKVrK_thr_copy = make_tiled_copy_B(typename KV::S2R{}, kv_tiled_mma).get_thread_slice(threadIdx.x);
 
-    auto tKVrKV_acc_thr_s2r = make_tiled_copy_C(typename KV::S2R_acc{}, kv_tiled_mma).get_thread_slice(threadIdx.x);
-    auto tKVrKV_acc_thr_r2s = make_tiled_copy_C(typename KV::R2S_acc{}, kv_tiled_mma).get_thread_slice(threadIdx.x);
     auto tKVrKV_opd_thr_r2s = make_tiled_copy_C(typename KV::R2S_opd{}, kv_tiled_mma).get_thread_slice(threadIdx.x);
 
     // A
@@ -207,14 +211,9 @@ struct LinearAttentionPrefillPipeline {
     auto tKVsK    = tKVrK_thr_copy.partition_S(sK);
     // C
     auto tKVgKV = kv_thr_mma.partition_C(select_tensor<1, 0>(gKV));
-    auto tKVsKV = kv_thr_mma.partition_C(select_tensor<1, 0>(sKV_acc));
 
-    auto tKVrKV     = kv_thr_mma.partition_fragment_C(select_tensor<1, 0>(sKV_acc));
-    auto tKVrKV_s2r = tKVrKV_acc_thr_s2r.retile_D(tKVrKV);
-    auto tKVsKV_s2r = tKVrKV_acc_thr_s2r.partition_S(select_tensor<1, 0>(sKV_acc));
-    auto tKVrKV_r2s = tKVrKV_acc_thr_r2s.retile_S(tKVrKV);
-    auto tKVsKV_r2s = tKVrKV_acc_thr_r2s.partition_D(select_tensor<1, 0>(sKV_opd));
-    auto tKVsKV_cvt = tKVrKV_acc_thr_r2s.partition_D(select_tensor<1, 0>(sKV_opd));
+    auto tKVsKV_cvt = tKVrKV_opd_thr_r2s.partition_D(select_tensor<1, 0>(sKV_opd));
+    auto tKVrKV     = make_fragment_like<TState>(tKVsKV_cvt);
 #if 0
     if (thread0()) {
       print("------\n");
@@ -222,8 +221,6 @@ struct LinearAttentionPrefillPipeline {
       print("tKVrK : "), print(tKVrK), print("\n");
       print("tKVsV : "), print(tKVsV), print("\n");
       print("tKVrV : "), print(tKVrV), print("\n");
-      print("sKV   : "), print(sKV_acc), print("\n");
-      print("tKVsKV: "), print(tKVsKV), print("\n");
       print("tKVrKV: "), print(tKVrKV), print("\n");
     }
 #endif
@@ -276,7 +273,7 @@ struct LinearAttentionPrefillPipeline {
     bool const needs_decay = decay != 1.0f;
     float      block_decay = 1.0f;
     if (needs_decay) {
-      precompute_decay(decay, smem->decay.data(), smem->decay_inv.data());
+      precompute_decay(decay, smem->decay.data());
       __syncthreads();
       block_decay = smem->decay[BlockSize];
     }
@@ -326,11 +323,11 @@ struct LinearAttentionPrefillPipeline {
       if (blk != 0) {
         copy(typename O::S2R{}, tOsQ(_, _, _, pipe), tOrQ_cv);
         copy(typename O::S2R{}, tOsKV, tOrKV_cv);
-        gemm(o_tiled_mma, tOrQ, tOrKV, tOrO);
+        gemm(o_thr_mma, tOrQ, tOrKV, tOrO);
         if (needs_decay) {
           transform(tOrO, tOcO, tOrO, [&](auto val, auto coord) {
             auto [_, tok] = coord;
-            return val * smem->decay[tok];
+            return val * smem->decay[tok + decay_exponent_offset];
           });
         }
       }
@@ -340,7 +337,7 @@ struct LinearAttentionPrefillPipeline {
       __syncthreads();  // ensure finished writing of QK buffer (finished KV buffer consumption as a side effect)
       copy(typename O::S2R_V{}, tOsV(_, _, _, pipe), tOrV_cv);
       copy(typename O::S2R{}, tOsQK, tOrQK_cv);
-      gemm(o_tiled_mma, tOrQK, tOrV, tOrO);
+      gemm(o_thr_mma, tOrQK, tOrV, tOrO);
       if constexpr (!is_final_block) {
         PIPE_DEBUG_PRINTF("[%d,%d,%d]>> save tOrO -> tOgO, blk=%d\n", seq_idx, qo_head_idx, kv_head_idx, blk);
         copy(tOrO, tOgO(_, _, _, blk));
@@ -357,41 +354,31 @@ struct LinearAttentionPrefillPipeline {
       PIPE_DEBUG_PRINTF("[%d,%d,%d]** compute KV\n", seq_idx, qo_head_idx, kv_head_idx);
       copy(typename KV::S2R{}, tKVsV(_, _, _, pipe), tKVrV_cv);  // load A
       copy(typename KV::S2R{}, tKVsK(_, _, _, pipe), tKVrK_cv);  // load B
-      if (needs_decay) {                                         // decay by Lambda
+      if (needs_decay) {                                         // decay by Lambda * lambda^(-tok)
+        int B = is_final_block ? remaining_seq_len(blk) : BlockSize;
         transform(tKVrK, tKVcK, tKVrK, [&](auto val, auto coord) {
-          auto [_, tok] = coord;
-          return val * smem->decay_inv[tok];
+          auto tok = get<1>(coord);
+          float decay_k = [&]{
+            if constexpr (!is_final_block) { return smem->decay[B - tok - decay_exponent_offset]; }
+            else { return tok < B ? smem->decay[B - tok - decay_exponent_offset] : 1.0f; }
+          }();
+          return decltype(val)(val * decay_k);
         });
       }
       auto tKVrKV_inc = make_tensor_like(tKVrKV);
       clear(tKVrKV_inc);
       gemm(kv_tiled_mma, tKVrV, tKVrK, tKVrKV_inc);
-      float inc_kv_scale = scale * block_decay;
-      if (inc_kv_scale != 1.0f) {
-        transform(tKVrKV_inc, [&](auto val) { return inc_kv_scale * val; });
+      if (scale != 1.0f) {
+        transform(tKVrKV_inc, tKVrKV_inc, [&](auto val) { return val * scale; });
       }
+      transform(tKVrKV, tKVrKV_inc, tKVrKV, [&](auto carried_kv, auto inc_kv) { return block_decay * carried_kv + inc_kv; });
 
-      if (CUDA_UNIFORM_UNLIKELY(blk == 0)) {
-        PIPE_DEBUG_PRINTF("[%d,%d,%d]>> zero init tKVrKV\n", seq_idx, qo_head_idx, kv_head_idx);
-        clear(tKVrKV);
-      } else {
-        PIPE_DEBUG_PRINTF("[%d,%d,%d]>> load tKVsKV -> tKVrKV\n", seq_idx, qo_head_idx, kv_head_idx);
-        copy(typename KV::S2R_acc{}, tKVsKV_s2r, tKVrKV_s2r);  // load carried_kv for acc
-      }
-      if (needs_decay) {
-        // NOTE: block_decay was applied on inc_kv previously
-        transform(tKVrKV, tKVrKV_inc, tKVrKV, [&](auto carried_kv, auto inc_kv) { return block_decay * carried_kv + inc_kv; });
-      } else {
-        transform(tKVrKV, tKVrKV_inc, tKVrKV, [&](auto carried_kv, auto inc_kv) { return carried_kv + inc_kv; });
-      }
-
-      if constexpr (!is_final_block) {  // write gKV for output
+      if constexpr (!is_final_block) {  // write sKV for next block
         PIPE_DEBUG_PRINTF("[%d,%d,%d]>> save tKVrKV -> tKVsKV\n", seq_idx, qo_head_idx, kv_head_idx);
-        copy(typename KV::R2S_opd{}, tKVrKV_r2s, tKVsKV_cvt);  // premature convert for next block iteration
-        copy(typename KV::R2S_acc{}, tKVrKV_r2s, tKVsKV_r2s);
-      } else {  // write sKV for next block
+        copy(typename KV::R2S_opd{}, tKVrKV, tKVsKV_cvt);  // premature convert for next block iteration
+      } else {  // write gKV for output
         bool is_lead_kv_head = (qo_head_idx % (num_qo_heads / num_kv_heads)) == 0;
-        if (is_lead_kv_head) {
+        if (per_head_decay || is_lead_kv_head) {
           PIPE_DEBUG_PRINTF("[%d,%d,%d]>> save tKVrKV -> tKVgKV\n", seq_idx, qo_head_idx, kv_head_idx);
           copy(tKVrKV, tKVgKV);
         }
@@ -420,7 +407,8 @@ struct LinearAttentionPrefillPipeline {
       }
     });
 
-    // clear(tKVsKV);  // also as clear(tOsKV);
+    PIPE_DEBUG_PRINTF("[%d,%d,%d]>> zero init tKVrKV\n", seq_idx, qo_head_idx, kv_head_idx);
+    clear(tKVrKV);
     __syncthreads();
 
     int blk = 0;
@@ -508,24 +496,19 @@ public:
     using QKLayoutAtom = Layout<Shape<_8, _8>>;
     using QKLayout     = decltype(tile_to_shape(QKLayoutAtom{}, Shape<Int<BlockSize>, Int<BlockSize>>{}));
 
-    using KVAccLayoutAtom = Layout<Shape<Shape<_2, _4>, _8>, Stride<Stride<_32, _1>, _4>>;
-    using KVAccLayout     = decltype(tile_to_shape(KVAccLayoutAtom{}, Shape<Int<HeadSize>, Int<HeadSize>>{}));
-
     using KVOpdLayoutAtom = Layout<Shape<_8, _8>>;
     using KVOpdLayout     = decltype(tile_to_shape(KVOpdLayoutAtom{}, Shape<Int<HeadSize>, Int<HeadSize>>{}));
 
-    cute::array_aligned<TQKV, cosize_v<QLayout>, 32>       q;
-    cute::array_aligned<TQKV, cosize_v<KLayout>, 32>       k;
-    cute::array_aligned<TQKV, cosize_v<VLayout>, 32>       v;
-    cute::array_aligned<TQKV, cosize_v<QKLayout>, 32>      qk;
-    cute::array_aligned<TQKV, cosize_v<KVOpdLayout>, 32>   kv_opd;
-    cute::array_aligned<TState, cosize_v<KVAccLayout>, 32> kv_acc;
-    cute::array_aligned<float, BlockSize + 1>              decay;
-    cute::array_aligned<float, BlockSize + 1>              decay_inv;
+    cute::array_aligned<TQKV, cosize_v<QLayout>>     q;
+    cute::array_aligned<TQKV, cosize_v<KLayout>>     k;
+    cute::array_aligned<TQKV, cosize_v<VLayout>>     v;
+    cute::array_aligned<TQKV, cosize_v<QKLayout>>    qk;
+    cute::array_aligned<TQKV, cosize_v<KVOpdLayout>> kv_opd;
+    cute::array_aligned<float, BlockSize + 1>        decay;
   };
 
   __forceinline__ __device__ static void
-  precompute_decay(float decay_factor, float* decay, float* decay_inv) {
+  precompute_decay(float decay_factor, float* decay) {
     constexpr int WarpSize = 32;
     int           warp_id  = threadIdx.x / WarpSize;
     int           lane_id  = threadIdx.x % WarpSize;
@@ -549,8 +532,7 @@ public:
       if (vidx == base) { prod = 1.0f; };                  // correct prod as 2^0, 2^1, ..., 2^tid, ... for first iter
       if (base != 0) { prod *= scale * decay[base - 1]; }  // correct prod as 2^(tid+1) for remaining iters
       if (vidx < len) {
-        decay[vidx]     = prod;
-        decay_inv[vidx] = __frcp_rn(prod);
+        decay[vidx] = prod;
       }
     }
   }
@@ -638,7 +620,10 @@ public:
     copy_if(p, std::forward<Src>(src), std::forward<Dst>(dst));
   }
 
-  using MMA = SM80_16x8x16_F32F16F16F32_TN;
+  using MMA = std::conditional_t<
+      std::is_same_v<TQKV, cute::bfloat16_t>,
+      SM80_16x8x16_F32BF16BF16F32_TN,
+      SM80_16x8x16_F32F16F16F32_TN>;
   struct QK {
     using TiledMMA = decltype(make_tiled_mma(
         MMA{},
@@ -647,7 +632,7 @@ public:
     ));
     static_assert(size_v<QK::TiledMMA> == NumThreads, "CTA Cooperative MMA Assumed!");
 
-    using S2R = Copy_Atom<SM75_U32x4_LDSM_N, half>;
+    using S2R = Copy_Atom<SM75_U32x4_LDSM_N, TQKV>;
   };
 
   struct KV {
@@ -657,11 +642,11 @@ public:
         Tile<_32, _32, _32>{}
     ));
     static_assert(size_v<KV::TiledMMA> == NumThreads, "CTA Cooperative MMA Assumed!");
-    using S2R = Copy_Atom<SM75_U16x8_LDSM_T, half>;
+    using S2R = Copy_Atom<SM75_U16x8_LDSM_T, TQKV>;
 
     using S2R_acc = Copy_Atom<SM75_U32x4_LDSM_N, float>;
     using R2S_acc = Copy_Atom<AutoVectorizingCopy, float>;
-    using R2S_opd = Copy_Atom<AutoVectorizingCopy, half>;
+    using R2S_opd = Copy_Atom<AutoVectorizingCopy, TQKV>;
   };
 
   struct O {
@@ -672,8 +657,8 @@ public:
     ));
     static_assert(size_v<O::TiledMMA> == NumThreads, "CTA Cooperative MMA Assumed!");
 
-    using S2R   = Copy_Atom<SM75_U32x4_LDSM_N, half>;
-    using S2R_V = Copy_Atom<SM75_U16x8_LDSM_T, half>;  // specific to V, it needs transpose
+    using S2R   = Copy_Atom<SM75_U32x4_LDSM_N, TQKV>;
+    using S2R_V = Copy_Atom<SM75_U16x8_LDSM_T, TQKV>;  // specific to V, it needs transpose
   };
 };
 
@@ -685,20 +670,22 @@ template <
     typename TQKV,
     typename TState>
 __launch_bounds__(256, 1) __global__ void linear_attention_prefill_kernel(
-    TO* __restrict__ output,               // ["packed_seq", Hqo, dq]
-    TState* __restrict__ state,            // [num_seqs, Hkv, dv, dk], aka, KV
-    TQKV const* __restrict__ q,            // ["packed_seq", Hqo, dq]
-    TQKV const* __restrict__ k,            // ["packed_seq", Hkv, dk]
-    TQKV const* __restrict__ v,            // ["packed_seq", Hkv, dv]
-    int64_t const* __restrict__ seq_lens,  // [num_seqs + 1], prefix scan of packed length of sequences in the batch
+    TO* __restrict__ output,                 // ["packed_seq", Hqo, dq]
+    TState* __restrict__ state,              // [num_seqs, Hkv, dv, dk], aka, KV
+    TQKV const* __restrict__ q,              // ["packed_seq", Hqo, dq]
+    TQKV const* __restrict__ k,              // ["packed_seq", Hkv, dk]
+    TQKV const* __restrict__ v,              // ["packed_seq", Hkv, dv]
+    int64_t const* __restrict__ cu_seqlens,  // [num_seqs + 1], prefix scan of packed length of sequences in the batch
     int32_t num_seqs,
     int32_t num_qo_heads,
     int32_t num_kv_heads,
     float   scale,
-    float   decay
+    float   decay,
+    float const* per_head_decay,
+    int32_t decay_exponent_offset
 ) {
   using Pipeline = LinearAttentionPrefillPipeline<NumThreads, HeadSize, BlockSize, TO, TQKV, TState>;
-  Pipeline::attention(output, state, q, k, v, seq_lens, num_seqs, num_qo_heads, num_kv_heads, scale, decay);
+  Pipeline::attention(output, state, q, k, v, cu_seqlens, num_seqs, num_qo_heads, num_kv_heads, scale, decay, per_head_decay, decay_exponent_offset);
 }
 
 template <
@@ -713,5 +700,6 @@ inline size_t linear_attention_prefill_kernel_smem_size() {
   return sizeof(typename Pipeline::Smem);
 }
 
-} // namespace kernels
-} // namespace tensorrt_llm 
+
+} //namespace kernels
+} //namespace tensorrt_llm

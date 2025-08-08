@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -385,30 +385,7 @@ def _register_fake():
     ) -> None:
         pass
 
-    @torch.library.register_fake("trtllm::linear_attention_prefill")
-    def _(
-        output: torch.Tensor,
-        state: torch.Tensor,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        cu_seq_lens: torch.Tensor,
-        num_seqs: int,
-        num_qo_heads: int,
-        num_kv_heads: int,
-        head_size: int,
-        scale: float,
-        decay: float,
-    ) -> None:
-        # Linear attention prefill modifies output and state in-place
-        pass
+    # 完全注释掉register_fake，让C++实现处理所有逻辑
+    # 如果需要torch.compile支持，可以后续再添加
+    pass
 
-    @torch.library.register_fake("trtllm::linear_attention_prefill_smem_size")
-    def _(
-        num_qo_heads: int,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> int:
-        # Return a dummy shared memory size
-        # The actual size will be computed by the C++ implementation
-        return 0

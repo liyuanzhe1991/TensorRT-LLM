@@ -108,7 +108,7 @@ def main():
         "--prompts",
         type=str,
         nargs="+",
-        #default="强化学习（Reinforcement Learning, RL）作为机器学习的一个重要分支，通过智能体与环境的交互来学习最优策略，在游戏AI、机器人控制、推荐系统等领域取得了显著成功。请全面深入地解释强化学习的概念、原理和应用：首先，请详细解释什么是强化学习，它与监督学习和无监督学习的根本区别，强化学习的基本要素包括智能体（Agent）、环境（Environment）、状态（State）、动作（Action）、奖励（Reward）、策略（Policy）等概念的定义和相互关系；其次，请深入分析强化学习的数学基础，包括马尔可夫决策过程（MDP）的数学框架、贝尔曼方程的推导和意义、价值函数和Q函数的概念、以及最优策略的数学定义；然后，请详细介绍强化学习的主要算法类别，包括基于价值的方法（如Q-learning、SARSA、DQN等）、基于策略的方法（如REINFORCE、Actor-Critic等）、以及模型基础的方法，解释每种方法的核心思想、算法流程、优缺点和适用场景；接下来，请分析深度强化学习的发展，包括深度Q网络（DQN）如何解决了传统强化学习在高维状态空间中的困难、策略梯度方法的改进（PPO、A3C等）、以及AlphaGo、AlphaStar等里程碑式应用的技术原理；然后，请介绍强化学习在各个领域的具体应用案例，包括游戏AI（围棋、电子竞技游戏）、机器人控制（机械臂操作、移动机器人导航）、自动驾驶、金融交易、推荐系统、资源调度等，分析强化学习在这些领域成功的原因和面临的挑战；最后，请讨论强化学习当前的研究热点和未来发展方向，包括多智能体强化学习、层次化强化学习、元学习、安全强化学习、离线强化学习等前沿技术。",
+        default="强化学习（Reinforcement Learning, RL）作为机器学习的一个重要分支，通过智能体与环境的交互来学习最优策略，在游戏AI、机器人控制、推荐系统等领域取得了显著成功。请全面深入地解释强化学习的概念、原理和应用：首先，请详细解释什么是强化学习，它与监督学习和无监督学习的根本区别，强化学习的基本要素包括智能体（Agent）、环境（Environment）、状态（State）、动作（Action）、奖励（Reward）、策略（Policy）等概念的定义和相互关系；其次，请深入分析强化学习的数学基础，包括马尔可夫决策过程（MDP）的数学框架、贝尔曼方程的推导和意义、价值函数和Q函数的概念、以及最优策略的数学定义；然后，请详细介绍强化学习的主要算法类别，包括基于价值的方法（如Q-learning、SARSA、DQN等）、基于策略的方法（如REINFORCE、Actor-Critic等）、以及模型基础的方法，解释每种方法的核心思想、算法流程、优缺点和适用场景；接下来，请分析深度强化学习的发展，包括深度Q网络（DQN）如何解决了传统强化学习在高维状态空间中的困难、策略梯度方法的改进（PPO、A3C等）、以及AlphaGo、AlphaStar等里程碑式应用的技术原理；然后，请介绍强化学习在各个领域的具体应用案例，包括游戏AI（围棋、电子竞技游戏）、机器人控制（机械臂操作、移动机器人导航）、自动驾驶、金融交易、推荐系统、资源调度等，分析强化学习在这些领域成功的原因和面临的挑战；最后，请讨论强化学习当前的研究热点和未来发展方向，包括多智能体强化学习、层次化强化学习、元学习、安全强化学习、离线强化学习等前沿技术。",
         help="Input prompts for generation",
     )
     
@@ -116,7 +116,7 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=300,
+        default=100,
         help="Maximum number of tokens to generate",
     )
     parser.add_argument(
@@ -162,13 +162,13 @@ def main():
     parser.add_argument(
         "--max-batch-size",
         type=int,
-        default=2,
+        default=1,
         help="Maximum batch size",
     )
     parser.add_argument(
         "--max-seq-len",
         type=int,
-        default=4096,
+        default=500,
         help="Maximum sequence length",
     )
     parser.add_argument(
@@ -315,9 +315,13 @@ def main():
         top_p=args.top_p,
         # Add more parameters to control generation
         repetition_penalty=1.1,  # Avoid repetition
-        min_tokens=350,  # Generate at least 100 tokens
+        min_tokens=50,  # Generate at least 100 tokens
         ignore_eos=True,  # Control whether to ignore EOS token
         stop_token_ids=None,  # Let the model use its default stop tokens
+
+        # prompt_logprobs在PyTorch后端不支持，已移除
+        return_context_logits=True,  # 返回context的logits
+        return_generation_logits=True,  # 返回生成的logits
     )
     
     print(f"\nSampling parameters:")
@@ -405,19 +409,52 @@ def main():
     print("GENERATION RESULTS")
     print("=" * 80)
     
+    # 保存所有logits
+    all_logits = []
+    
     for i, output in enumerate(outputs):
         prompt = output.prompt
+        print("output",output)
         generated_text = output.outputs[0].text
         completion_output = output.outputs[0]
         
         print(f"\n[Prompt {i+1}]")
         print(f"Input: {prompt}")
         print(f"Output: {generated_text}")
-        print(f"Output length: {len(generated_text.split())} words, {len(completion_output.token_ids)} tokens")
-        print(f"Finish reason: {completion_output.finish_reason}")
+        # print(f"Output length: {len(generated_text.split())} words, {len(completion_output.token_ids)} tokens")
+        # print(f"Finish reason: {completion_output.finish_reason}")
         if hasattr(completion_output, 'stop_reason'):
             print(f"Stop reason: {completion_output.stop_reason}")
+        
+        # 获取并显示logits信息
+        if hasattr(completion_output, 'logprobs') and completion_output.logprobs:
+            print(f"Log probabilities available: {len(completion_output.logprobs)} tokens")
+            # 显示前几个token的log prob
+            for j, logprob_info in enumerate(completion_output.logprobs[:5]):
+                if logprob_info:
+                    print(f"  Token {j}: logprob={logprob_info.logprob:.4f}")
+        
+        # 获取logits
+        if hasattr(output, 'context_logits'):
+            print(f"Context logits shape: {output.context_logits.shape if output.context_logits is not None else 'None'}")
+            all_logits.append({
+                'prompt_id': i,
+                'context_logits': output.context_logits,
+            })
+        
+        if hasattr(completion_output, 'logits'):
+            print(f"Generation logits available: {completion_output.logits is not None}")
+            if 'prompt_id' in all_logits[-1]:
+                all_logits[-1]['generation_logits'] = completion_output.logits
+        
         print("-" * 80)
+    
+    # # 显示logits内容
+    # for logit in all_logits:
+    #     print(f"Prompt ID: {logit['prompt_id']}")
+    #     print(f"Context Logits: {logit['context_logits']}")
+    #     print(f"Generation Logits: {logit['generation_logits']}")
+    #     print("-" * 80)
     
     # Print timing statistics
     print("\n" + "=" * 80)

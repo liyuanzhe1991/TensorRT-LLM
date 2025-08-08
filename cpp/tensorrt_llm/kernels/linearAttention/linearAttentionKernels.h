@@ -1,8 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include <cuda_fp16.h>
-#include <cuda_runtime.h>
+#include "cuda_runtime_api.h"
 
 namespace tensorrt_llm
 {
@@ -23,14 +22,12 @@ void launchLinearAttentionPrefillKernel(
     int32_t num_kv_heads,
     int32_t head_size,
     float scale,
-    float decay);
+    float decay,
+    float const* per_head_deacy,
+    int32_t decay_exponent_offset);
 
-// Get shared memory size for the kernel
-template <typename TO, typename TQKV, typename TState>
-size_t getLinearAttentionPrefillKernelSmemSize(
-    int32_t num_qo_heads,
-    int32_t num_kv_heads,
-    int32_t head_size);
 
 } // namespace kernels
 } // namespace tensorrt_llm 
+
+

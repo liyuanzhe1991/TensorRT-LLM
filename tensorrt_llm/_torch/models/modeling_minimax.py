@@ -128,16 +128,13 @@ class MiniMaxLinearCacheManager:
     
     def free_seq(self, seq_id: int):
         """Free the cache slot used by a sequence"""
-        logger.info(f"minimax cache manager free_seq {seq_id} before_free_slots {self.free_slots} ")
+        #print("trt free_seq",seq_id)
         if seq_id in self.seq_id_to_slot_idx.keys():
             slot_idx = self.seq_id_to_slot_idx[seq_id]
             del self.seq_id_to_slot_idx[seq_id]
             self.free_slots.append(slot_idx)
             # Clear the cache slot
             self.cache[:, slot_idx].zero_()
-            #print(f"after_free_slots {self.free_slots}")
-        else:
-            logger.warning(f"seq_id {seq_id} not found in seq_id_to_slot_idx")
     
     def clear_all(self):
         """Clear all cache slots and mappings"""
@@ -310,9 +307,10 @@ class MiniMaxText01RMSNorm(nn.Module):
         MiniMaxText01RMSNorm is equivalent to T5LayerNorm
         """
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size,dtype=torch.bfloat16))
+        self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
         self.variance_res=None
+        
     def forward(self, hidden_states):
         input_dtype = hidden_states.dtype
         #print("trt rmsnorm forward hidden_states",hidden_states.shape,hidden_states.dtype,"weight",self.weight.shape,self.weight.dtype)
@@ -321,7 +319,7 @@ class MiniMaxText01RMSNorm(nn.Module):
         self.variance_res=variance
 
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * (hidden_states).to(input_dtype)
+        return (self.weight * (hidden_states)).to(input_dtype)
     
 class MiniMaxText01RMSNormTP(nn.Module):
     """RMSNorm with tensor parallelism support for MiniMax Linear Attention."""
@@ -340,7 +338,7 @@ class MiniMaxText01RMSNormTP(nn.Module):
         self.local_hidden_size = hidden_size // self.tp_world
         
         # Create weight parameter for the local portion
-        self.weight = nn.Parameter(torch.ones(self.local_hidden_size,dtype=torch.bfloat16))
+        self.weight = nn.Parameter(torch.ones(self.local_hidden_size))
         self.variance_epsilon = eps
         # Use float32 for all_reduce to ensure compatibility
         self.all_reduce = AllReduce(mapping=mapping, dtype=torch.float32,strategy=AllReduceStrategy.NCCL)
@@ -379,7 +377,7 @@ class MiniMaxText01RMSNormTP(nn.Module):
                 weight = self.weight[:x.size(-1)]
         
         # Apply weight
-        x = x.to(orig_dtype) * weight
+        x = (x * weight).to(orig_dtype)
         #self.input_layernorm_output=x.clone()
         return x
     
@@ -500,6 +498,8 @@ class MiniMaxText01LinearAttention(nn.Module):
         self.register_buffer('tp_slope', 
                            self.slope_rate[self.tp_rank * self.tp_heads:(self.tp_rank + 1) * self.tp_heads].contiguous())
         
+        # Add batch decode option
+        self.use_batch_decode = False  # Enable batch processing for decode by default
         
         self.q=None
         self.k=None
@@ -631,16 +631,21 @@ class MiniMaxText01LinearAttention(nn.Module):
         
         # if self.tp_rank == 0:    
         #     print(f"rank 0 layer {self.linear_layer_idx} state_indices {state_indices}")
+        # if self.tp_rank == 0 and self.linear_layer_idx == 0:
+        #     print("num_contexts",num_contexts,"total_request_ids",total_request_ids)
         if num_contexts > 0:
             # Check if this is a mixed batch (both prefill and decode)
             if total_request_ids - num_contexts > 0:
-         
+                # if self.tp_rank == 0 and self.linear_layer_idx == 0:
+                #     print("using trt _mixed_forward")
                 output = self._mixed_forward(q, k, v, kv_cache, state_indices, attn_metadata)
             else:
-           
+                # if self.tp_rank == 0 and self.linear_layer_idx == 0:
+                #     print("using trt _prefill_forward")
                 output = self._prefill_forward(q, k, v, kv_cache, state_indices, attn_metadata)
         else:
-         
+            # if self.tp_rank == 0 and self.linear_layer_idx == 0:
+            #     print("using trt _decode_forward")
             output = self._decode_forward(q, k, v, kv_cache, state_indices, attn_metadata)
         
         output_with_heads = output.reshape(output.shape[0], -1)
@@ -655,7 +660,7 @@ class MiniMaxText01LinearAttention(nn.Module):
         # Apply output gate
         gate = self.output_gate(hidden_states)
         output = F.sigmoid(gate) * output
-        output = output.to(torch.bfloat16)
+        output = output.to(hidden_states.dtype)
         
         # Apply output projection
         output = self.out_proj(output)
@@ -678,38 +683,83 @@ class MiniMaxText01LinearAttention(nn.Module):
         start = 0
         assert getattr(attn_metadata, 'request_ids', None) is not None, "request_ids is not found in attn_metadata"
         
-        for seq_idx in range(len(getattr(attn_metadata, 'request_ids'))):
-            if hasattr(attn_metadata, 'seq_lens'):
-                seq_len = attn_metadata.seq_lens[seq_idx]
-                end = start + seq_len
+        if self.use_navie_linear: # if use navie linear attention then loop it 
+            if self.tp_rank == 0 and self.linear_layer_idx == 0:
+                print("using navie linear prefill")
+            for seq_idx in range(len(getattr(attn_metadata, 'request_ids'))):
+                if hasattr(attn_metadata, 'seq_lens'):
+                    seq_len = attn_metadata.seq_lens[seq_idx]
+                    end = start + seq_len
+                    
+                else:
+                    raise ValueError("seq_lens is not found in attn_metadata")
                 
-            else:
-                raise ValueError("seq_lens is not found in attn_metadata")
+                # Get cache slot for this sequence
+                cache_idx = state_indices[seq_idx] if state_indices is not None else seq_idx
+                
+                # Extract sequence data
+                seq_q = q[start:end]  # [seq_len, tp_heads, head_dim]
+                seq_k = k[start:end]  # [seq_len, tp_heads, head_dim]
+                seq_v = v[start:end]  # [seq_len, tp_heads, head_dim]
+                
+                # Process with Lightning Attention (causal masking is implicit)
+                #print("trt tp_slope",self.tp_slope)
+                #print("trt prefill seq_idx",seq_idx,"cache_idx",cache_idx)
+                
+                #FIXME this is not batching,need to change to batching with prefill
+        
+                seq_output = self._lightning_attention_forward(
+                    seq_q,
+                    seq_k,
+                    seq_v,
+                    kv_cache[cache_idx],
+                    self.tp_slope
+                )
+                outputs.append(seq_output)
+                start = end
+            #dump the output by rank_layer_output/kv
+            #if self.tp_rank == 0 and self.linear_layer_idx == 0:
+            outputs=torch.cat(outputs, dim=0) if outputs else torch.empty((0, self.tp_heads * self.head_dim), device=q.device, dtype=q.dtype)
+          
+            return outputs
+        else: # if not use navie linear attention then use batching
+            if self.tp_rank == 0 and self.linear_layer_idx == 0:
+                print("using batching prefill")
             
-            # Get cache slot for this sequence
-            cache_idx = state_indices[seq_idx] if state_indices is not None else seq_idx
+            # directly use index operation instead of loop to build batch_kv_cache
+            if state_indices is None:
+                raise ValueError("there is no state_indices in prefill")
+            #need to get the cache idx from state_indices
+            batch_kv_cache_idx=[]
+            for seq_idx in range(len(getattr(attn_metadata, 'request_ids'))):
+                # Get cache slot for this sequence
+                cache_idx = state_indices[seq_idx] if state_indices is not None else seq_idx
+                batch_kv_cache_idx.append(cache_idx)
             
-            # Extract sequence data
-            seq_q = q[start:end]  # [seq_len, tp_heads, head_dim]
-            seq_k = k[start:end]  # [seq_len, tp_heads, head_dim]
-            seq_v = v[start:end]  # [seq_len, tp_heads, head_dim]
+            batch_kv_cache_idx=torch.tensor(batch_kv_cache_idx,dtype=torch.int64,device=q.device)
+            batch_kv_cache = kv_cache[batch_kv_cache_idx].clone().contiguous()
             
-            # Process with Lightning Attention (causal masking is implicit)
-            #print("trt tp_slope",self.tp_slope)
-            #print("trt prefill seq_idx",seq_idx,"cache_idx",cache_idx)
-            seq_output = self._lightning_attention_forward(
-                seq_q,
-                seq_k,
-                seq_v,
-                kv_cache[cache_idx],
-                self.tp_slope
+           
+            output = self._lightning_attention_forward(
+                q,
+                k,
+                v,
+                batch_kv_cache,
+                torch.exp(-self.tp_slope.to(torch.float32))
             )
-            outputs.append(seq_output)
-            start = end
+            #dump the output by rank_layer_output/kv
+            #if self.tp_rank == 0 and self.linear_layer_idx == 0:
             
-        return torch.cat(outputs, dim=0) if outputs else torch.empty((0, self.tp_heads * self.head_dim), device=q.device, dtype=q.dtype)
+            
+            batch_kv_cache = batch_kv_cache.transpose(2, -1).to(kv_cache.dtype)
+            # 使用索引赋值来更新kv_cache，确保正确的维度匹配
+            for i, cache_idx in enumerate(batch_kv_cache_idx):
+                kv_cache[cache_idx] = batch_kv_cache[i]
+            #kv_cache[batch_kv_cache_idx].copy_(batch_kv_cache)
+          
+            return output
     
-    def     _decode_forward(
+    def _decode_forward(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -719,21 +769,30 @@ class MiniMaxText01LinearAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         """Handle decode phase with single token per sequence"""
-        outputs = []
         
-      
         if state_indices is not None and len(state_indices) != len(attn_metadata.request_ids):
             raise RuntimeError(
                 f"Mismatch: state_indices length {len(state_indices)} != num_active_seqs {len(attn_metadata.request_ids)}. "
                 f"This should have been handled in the forward() method."
             )
         
-        # Process each active sequence
-        state_indices=state_indices.clone().cpu().tolist()
-        for seq_idx in range(len(attn_metadata.request_ids)):
+        # Check if we should use batch processing
+        num_seqs = len(attn_metadata.request_ids)
+        #use_batch_decode = getattr(self, 'use_batch_decode', True)  # Default to True for batch processing
+        #print("trt use_batch_decode",use_batch_decode,"num_seqs",num_seqs)
+        # Use batch processing if enabled and we have multiple sequences
+        # if self.use_batch_decode and num_seqs > 1:
+        #     return self._lightning_attention_decode_batch(
+        #         q, k, v, kv_cache, state_indices, attn_metadata
+        #     )
+        
+        # Otherwise, use the original sequential processing
+        outputs = []
+        #state_indices_list = state_indices.clone().cpu().tolist() if state_indices is not None else None
+        
+        for seq_idx in range(num_seqs):
             # Get cache slot for this sequence
             if state_indices is not None:
-             
                 cache_idx = state_indices[seq_idx]
             else:
                 cache_idx = seq_idx
@@ -753,6 +812,7 @@ class MiniMaxText01LinearAttention(nn.Module):
                 )
             
             #print("trt decode seq_idx",seq_idx,"cache_idx",cache_idx)
+            
             seq_output = self._lightning_attention_decode(
                 q[seq_idx:seq_idx+1],  # [1, tp_heads, head_dim]
                 k[seq_idx:seq_idx+1],  # [1, tp_heads, head_dim]
@@ -765,6 +825,70 @@ class MiniMaxText01LinearAttention(nn.Module):
         result = torch.cat(outputs, dim=0)
           
         return result
+    
+    def _lightning_attention_decode_batch(
+        self,
+        q: torch.Tensor,  # [batch_size, tp_heads, head_dim]
+        k: torch.Tensor,  # [batch_size, tp_heads, head_dim]
+        v: torch.Tensor,  # [batch_size, tp_heads, head_dim]
+        kv_cache: torch.Tensor,  # [num_slots, tp_heads, head_dim, head_dim]
+        state_indices: Optional[torch.Tensor],  # [batch_size]
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
+        """Batch processing version of lightning attention decode"""
+        
+        print("using trt _lightning_attention_decode_batch")
+        
+        batch_size = q.shape[0]
+        tp_heads = q.shape[1]
+        head_dim = q.shape[2]
+        
+        # Convert to float32 for numerical stability
+        orig_dtype = q.dtype
+        q = q.to(torch.float32)
+        k = k.to(torch.float32)
+        v = v.to(torch.float32)
+        
+        # Get cache indices
+        if state_indices is not None:
+            cache_indices = state_indices
+        else:
+            cache_indices = torch.arange(batch_size, device=q.device)
+        
+        # Gather KV states for all sequences at once
+        # kv_cache shape: [num_slots, tp_heads, head_dim, head_dim]
+        # cache_indices shape: [batch_size]
+        # Result shape: [batch_size, tp_heads, head_dim, head_dim]
+        kv_states = kv_cache[cache_indices].to(torch.float32)
+        
+        # Get ratio for all heads
+        ratio = torch.exp(-self.tp_slope)  # [tp_heads, 1, 1]
+        
+        # Compute KV updates for all sequences in batch
+        # k shape: [batch_size, tp_heads, head_dim]
+        # v shape: [batch_size, tp_heads, head_dim]
+        # kv_update shape: [batch_size, tp_heads, head_dim, head_dim]
+        kv_update = torch.einsum('bhd,bhe->bhde', k, v)
+        
+        # Update KV states for all sequences
+        # Broadcast ratio to match batch dimension
+        new_kv_states = ratio.unsqueeze(0) * kv_states + kv_update
+        
+        # Write back updated states to cache
+        with torch.no_grad():
+            kv_cache[cache_indices] = new_kv_states.to(orig_dtype)
+        
+        # Compute outputs for all sequences
+        # q shape: [batch_size, tp_heads, head_dim]
+        # new_kv_states shape: [batch_size, tp_heads, head_dim, head_dim]
+        # output shape: [batch_size, tp_heads, head_dim]
+        output = torch.einsum('bhd,bhde->bhe', q, new_kv_states)
+        
+        # Convert back to original dtype and reshape
+        output = output.to(orig_dtype)
+        output = output.reshape(batch_size, -1)  # [batch_size, tp_heads * head_dim]
+        
+        return output
     
     def _mixed_forward(
         self,
@@ -852,36 +976,48 @@ class MiniMaxText01LinearAttention(nn.Module):
     ) -> torch.Tensor:
         """Lightning attention for prefill using torch.ops.trtllm.linear_attention_prefill"""
         # Get dimensions
+        #FIXME: the cu_seq_lens is not correct should be calculated before call this function,and get by metadata
         seq_len = q.shape[0]
-        num_heads = q.shape[1]  # tp_heads
+        num_heads = q.shape[1]  # tp_heads，qo_heads
         head_dim = q.shape[2]
-        print("seq_len",seq_len,"num_heads",num_heads,"head_dim",head_dim)
+        num_kv_heads = k.shape[1]
+        
+        #slope_rate= torch.ones(num_heads) * slope_rate - torch.arange(num_heads) * 0.05
+        #slope_rate=slope_rate.to(torch.float32).to(q.device)
+        #print("seq_len",seq_len,"num_heads",num_heads,"head_dim",head_dim)
         # Prepare for batch processing
         # The test file shows batch_size = 2, but here we process as single batch
-        batch_size = 1
         
         # Reshape tensors to match expected format: [batch_size * seq_len, num_heads, head_dim]
         # Currently: [seq_len, tp_heads, head_dim]
         # No need to reshape as the input is already in the correct format for single batch
         
         # Create output tensor
+        org_q_dtype=q.dtype
+        q=q.contiguous()## the input must be float16
+        k=k.contiguous()
+        v=v.contiguous()
         output = torch.zeros_like(q)
         
         # Create cumulative sequence lengths
         # For single sequence: [0, seq_len]
-        cu_seq_lens = torch.tensor([0, seq_len], dtype=torch.int64, device=q.device)
+        cu_seq_lens = torch.tensor([0, seq_len], dtype=torch.int64, device=q.device).contiguous()
+        
         
         # Ensure kv_state is in float32 for numerical stability
-        kv_state_f32 = kv_state.float()
+        kv_state_f32 = kv_state.to(torch.float32)
         
         # Calculate scale factor
-        scale = 1
+        scale = 1.0
+        # Note: slope_rate here is actually decay_rate (exp(-slope))
+        # The function expects: decay (scalar) and per_head_decay (tensor)
+        # We pass 1.0 as the scalar decay and use per_head_decay for actual decay values
         
-        #decay = torch.exp(-slope_rate.mean()).item()
-        decay =  self.start
-        print("trt decay",decay)
+        # Ensure slope_rate has the correct shape [num_heads]
+        # It comes in as [num_heads, 1, 1], need to squeeze
+        per_head_decay = slope_rate.squeeze(-1).squeeze(-1) if slope_rate.dim() > 1 else slope_rate
+        
         # Call the custom linear attention prefill operation
-        #try:
         torch.ops.trtllm.linear_attention_prefill(
             output,           # output tensor
             kv_state_f32,     # state tensor (will be updated in-place)
@@ -889,12 +1025,10 @@ class MiniMaxText01LinearAttention(nn.Module):
             k,                # key tensor
             v,                # value tensor
             cu_seq_lens,      # cumulative sequence lengths
-            batch_size,       # batch size
-            num_heads,        # number of heads (tp_heads)
-            num_heads,        # number of kv heads (same as num_heads for this implementation)
-            head_dim,         # head dimension
-            scale,            # scale factor
-            decay             # decay factor
+            scale,            # scale factor (1.0)
+            1.0,              # decay (scalar) - set to 1.0 since we use per_head_decay
+            per_head_decay,   # per_head_decay (tensor of decay rates per head)
+            1                 # decay_exponent_offset
         )
         
         # Update the original kv_state with the modified state
@@ -902,7 +1036,7 @@ class MiniMaxText01LinearAttention(nn.Module):
             
     
         #reshape output to [seq_len, tp_heads, head_dim]
-        print("block output",output.shape,output.dtype,output.device)
+        #print("block output",output.shape,output.dtype,output.device)
         output = output.reshape(-1, num_heads*head_dim)
         return output
         
@@ -926,15 +1060,17 @@ class MiniMaxText01LinearAttention(nn.Module):
        
         
         # Reshape to match HF format: [1, h, n, d]
-        q = q.transpose(0, 1).unsqueeze(0).to(torch.float32)  # [1, h, n, d]
-        k = k.transpose(0, 1).unsqueeze(0).to(torch.float32)  # [1, h, n, d]
-        v = v.transpose(0, 1).unsqueeze(0).to(torch.float32)  # [1, h, n, d]
         slope_rate = slope_rate.to(torch.float32)
+        q = q.transpose(0, 1).unsqueeze(0)  # [1, h, n, d]
+        k = k.transpose(0, 1).unsqueeze(0) # [1, h, n, d]
+        v = v.transpose(0, 1).unsqueeze(0)  # [1, h, n, d]
+        
         #print("trt slope_rate",slope_rate.shape,slope_rate.dtype,slope_rate.device)
         b, h, n, d = q.shape
         e = v.shape[-1]
-        
+        #kv_state=kv_state.to(q.dtype)
         # Block size
+        
         BLOCK = self.block_size
         NUM_BLOCK = (n + BLOCK - 1) // BLOCK
         
@@ -950,12 +1086,9 @@ class MiniMaxText01LinearAttention(nn.Module):
         #self.diag_decay=diag_decay
         # Initialize KV state
         kv = kv_state.to(torch.float32) # [h, d, e]
+        #print("navie kv state",kv.shape)
         output = torch.empty((b, h, n, e), dtype=q.dtype, device=q.device)
         
-        # Process blocks
-        #print("trt NUM_BLOCK",NUM_BLOCK)
-        
-        #print("trt kv debug",kv.min(),kv.max(),kv.mean())
         for i in range(NUM_BLOCK):
             si = i * BLOCK
             ei = min(si + BLOCK, n)
@@ -967,11 +1100,7 @@ class MiniMaxText01LinearAttention(nn.Module):
             ki = k[:, :, si:ei].contiguous()
             vi = v[:, :, si:ei].contiguous()
                 
-            # Non-diagonal part: interaction with previous KV state
-            # print("trt qi",qi.shape,qi.dtype,qi.device)
-            # print("trt q_decay",q_decay.shape,q_decay.dtype,q_decay.device)
-            # print("trt m",m)
-            #print("trt kv",kv.shape,kv.dtype,kv.device)
+         
             qkv_none_diag = torch.matmul(qi * q_decay[:, :m], kv.unsqueeze(0)).to(torch.float32)#inter blcok
          
             qk = torch.matmul(qi, ki.transpose(-1, -2)).to(torch.float32) * diag_decay[:, :, :m, :m]#
@@ -986,15 +1115,10 @@ class MiniMaxText01LinearAttention(nn.Module):
                 vi
             ).squeeze(0)  # Remove batch dimension for kv update
         
-        # Update the KV state
-        #print("trt kv",kv.shape,kv.dtype,kv.device)
+    
         
         with torch.no_grad():
             kv_state.copy_(kv)
-        # if self.layer_idx==0 and self.tp_rank==0:
-        #     print("layer {} rank {} trt kv_state prefill".format(self.layer_idx,self.tp_rank),kv_state.shape,kv_state.dtype,kv_state.device,kv_state.min(),kv_state.max(),kv_state.mean())
-        # Convert back to original format and dtype
-        #print("navie output",output.shape,output.dtype,output.device)
         output = output.squeeze(0).transpose(0, 1).contiguous()  # [n, h, d]
         #output = output.to(orig_dtype)
         
@@ -1130,7 +1254,7 @@ class MiniMaxText01RotaryEmbedding(nn.Module):
         #self.k_post_rope=None
         # Build here to make `torch.jit.trace` work.
         self._set_cos_sin_cache(
-            seq_len=max_position_embeddings, device=self.inv_freq.device, dtype=torch.bfloat16
+            seq_len=max_position_embeddings, device=self.inv_freq.device
         )
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
